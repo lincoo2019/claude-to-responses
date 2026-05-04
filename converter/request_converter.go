@@ -72,6 +72,9 @@ func ConvertResponsesRequestToClaude(body []byte) ([]byte, error) {
 	if len(req.Tools) > 0 {
 		claudeReq.Tools = make([]ClaudeTool, 0, len(req.Tools))
 		for _, tool := range req.Tools {
+			if tool.Name == "" {
+				continue
+			}
 			claudeReq.Tools = append(claudeReq.Tools, ClaudeTool{
 				Name:        tool.Name,
 				Description: tool.Description,
@@ -86,7 +89,7 @@ func ConvertResponsesRequestToClaude(body []byte) ([]byte, error) {
 func convertResponsesInputItem(item ResponsesInputItem) (*ClaudeMessage, string, error) {
 	switch item.Type {
 	case "", "message":
-		if item.Role == "system" {
+		if item.Role == "system" || item.Role == "developer" {
 			var texts []string
 			for _, part := range item.Content {
 				if part.Type == "input_text" || part.Type == "text" || part.Type == "output_text" {
@@ -153,7 +156,7 @@ func encodeResponsesContentToClaude(role string, parts []ResponsesContentPart) (
 		switch part.Type {
 		case "input_text", "output_text", "text":
 			out = append(out, ClaudeContentPart{Type: "text", Text: part.Text})
-		case "input_image":
+		case "input_image", "image_url":
 			if strings.HasPrefix(part.ImageURL, "data:") {
 				mimeType, data := parseBase64Image(part.ImageURL)
 				out = append(out, ClaudeContentPart{
@@ -201,5 +204,10 @@ func marshalClaudeToolResultContent(output json.RawMessage) (json.RawMessage, er
 	if len(output) == 0 {
 		return jsonx.Marshal("")
 	}
-	return output, nil
+	switch jsonx.FirstNonSpaceByte(output) {
+	case '"':
+		return output, nil
+	default:
+		return jsonx.Marshal(string(output))
+	}
 }

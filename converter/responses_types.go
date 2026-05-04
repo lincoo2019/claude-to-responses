@@ -64,18 +64,29 @@ type ResponsesUsage struct {
 }
 
 type ResponsesStreamEvent struct {
-	Type       string          `json:"type"`
-	ResponseID string          `json:"response_id,omitempty"`
-	ItemID     string          `json:"item_id,omitempty"`
-	Delta      string          `json:"delta,omitempty"`
-	OutputIndex int            `json:"output_index,omitempty"`
-	ContentIndex int           `json:"content_index,omitempty"`
-	Usage      *ResponsesUsage `json:"usage,omitempty"`
-	Response   *struct {
-		ID     string          `json:"id,omitempty"`
-		Object string          `json:"object,omitempty"`
-		Model  string          `json:"model,omitempty"`
-		Status string          `json:"status,omitempty"`
-		Usage  *ResponsesUsage `json:"usage,omitempty"`
-	} `json:"response,omitempty"`
+	Type         string               `json:"type"`
+	ResponseID   string               `json:"response_id,omitempty"`
+	ItemID       string               `json:"item_id,omitempty"`
+	OutputIndex  int                  `json:"output_index,omitempty"`
+	ContentIndex int                  `json:"content_index,omitempty"`
+	Delta        string               `json:"delta,omitempty"`
+	Usage        *ResponsesUsage      `json:"usage,omitempty"`
+	Response     *ResponsesEventResp  `json:"response,omitempty"`
+	Item         *ResponsesOutputItem `json:"item,omitempty"`
+	Part         *ResponsesContentRef `json:"part,omitempty"`
+}
+
+type ResponsesEventResp struct {
+	ID     string               `json:"id,omitempty"`
+	Object string               `json:"object,omitempty"`
+	Model  string               `json:"model,omitempty"`
+	Status string               `json:"status,omitempty"`
+	Output []ResponsesOutputItem `json:"output,omitempty"`
+	Usage  *ResponsesUsage      `json:"usage,omitempty"`
+}
+
+type ResponsesContentRef struct {
+	Type  string `json:"type"`
+	Text  string `json:"text,omitempty"`
+	Index int    `json:"index,omitempty"`
 }

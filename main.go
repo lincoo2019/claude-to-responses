@@ -76,6 +76,8 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/responses", handleResponses(cfg))
 	mux.HandleFunc("/v1/responses/", handleResponses(cfg))
+	mux.HandleFunc("/responses", handleResponses(cfg))
+	mux.HandleFunc("/responses/", handleResponses(cfg))
 	mux.HandleFunc("/v1/settings", handleSettings(cfg))
 	mux.HandleFunc("/health", handleHealth)
 	mux.HandleFunc("/", handleSettingsPage)
@@ -247,7 +249,7 @@ func handleResponses(cfg *Config) http.HandlerFunc {
 		}
 
 		if reqPreview.Stream {
-			handleStreamResponse(w, resp)
+			handleStreamResponse(w, resp, r)
 		} else {
 			handleNonStreamResponse(w, resp)
 		}
@@ -274,7 +276,7 @@ func handleNonStreamResponse(w http.ResponseWriter, resp *http.Response) {
 	w.Write(responsesBody)
 }
 
-func handleStreamResponse(w http.ResponseWriter, resp *http.Response) {
+func handleStreamResponse(w http.ResponseWriter, resp *http.Response, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeErrorResponse(w, http.StatusInternalServerError, "Streaming not supported")
@@ -289,7 +291,10 @@ func handleStreamResponse(w http.ResponseWriter, resp *http.Response) {
 	flusher.Flush()
 
 	responseID := converter.GenerateResponseID()
-	var model string
+
+	ctx := &converter.StreamContext{
+		ResponseID: responseID,
+	}
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -311,26 +316,26 @@ func handleStreamResponse(w http.ResponseWriter, resp *http.Response) {
 			break
 		}
 
-		converted, newRespID, err := converter.ConvertClaudeStreamEventToResponses(
-			"", []byte(payload), responseID, model,
+		converted, err := converter.ConvertClaudeStreamEventToResponses(
+			"", []byte(payload), ctx,
 		)
 		if err != nil {
 			log.Printf("Error converting stream event: %v", err)
 			continue
 		}
 
-		if newRespID != responseID {
-			responseID = newRespID
-		}
-
-		if len(converted) > 0 {
-			fmt.Fprintf(w, "data: %s\n\n", converted)
+		for _, event := range converted {
+			fmt.Fprintf(w, "data: %s\n\n", event)
 			flusher.Flush()
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		log.Printf("Error reading Claude stream: %v", err)
+		if r.Context().Err() != nil {
+			log.Printf("Client disconnected during stream: %v", r.Context().Err())
+		} else {
+			log.Printf("Error reading Claude stream: %v", err)
+		}
 	}
 }
 

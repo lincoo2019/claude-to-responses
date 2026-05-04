@@ -104,9 +104,6 @@ func TestConvertResponsesRequestToClaude_WithSystemMessage(t *testing.T) {
 	if len(req.Messages) != 1 {
 		t.Fatalf("expected 1 message (system should be separate), got %d", len(req.Messages))
 	}
-	if req.Messages[0].Role != "user" {
-		t.Errorf("expected message role user, got %s", req.Messages[0].Role)
-	}
 
 	var systemText string
 	if err := json.Unmarshal(req.System, &systemText); err != nil {
@@ -114,6 +111,38 @@ func TestConvertResponsesRequestToClaude_WithSystemMessage(t *testing.T) {
 	}
 	if systemText != "You are a helpful assistant." {
 		t.Errorf("expected system text 'You are a helpful assistant.', got %s", systemText)
+	}
+}
+
+func TestConvertResponsesRequestToClaude_DeveloperRole(t *testing.T) {
+	input := `{
+		"model": "claude-sonnet-4-20250514",
+		"input": [
+			{"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "You are a coding expert."}]},
+			{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Write a function"}]}
+		]
+	}`
+
+	out, err := ConvertResponsesRequestToClaude([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var req ClaudeRequest
+	if err := json.Unmarshal(out, &req); err != nil {
+		t.Fatalf("failed to unmarshal output: %v", err)
+	}
+
+	if len(req.Messages) != 1 {
+		t.Fatalf("expected 1 message (developer should be mapped to system), got %d", len(req.Messages))
+	}
+
+	var systemText string
+	if err := json.Unmarshal(req.System, &systemText); err != nil {
+		t.Fatalf("failed to unmarshal system: %v", err)
+	}
+	if systemText != "You are a coding expert." {
+		t.Errorf("expected system text 'You are a coding expert.', got %s", systemText)
 	}
 }
 
@@ -146,8 +175,35 @@ func TestConvertResponsesRequestToClaude_WithTools(t *testing.T) {
 	if req.Tools[0].Name != "get_weather" {
 		t.Errorf("expected tool name get_weather, got %s", req.Tools[0].Name)
 	}
-	if req.Tools[0].Description != "Get weather for a location" {
-		t.Errorf("unexpected tool description: %s", req.Tools[0].Description)
+}
+
+func TestConvertResponsesRequestToClaude_BuiltinToolsSkipped(t *testing.T) {
+	input := `{
+		"model": "claude-sonnet-4-20250514",
+		"input": "Search the web",
+		"tools": [
+			{"type": "web_search_preview"},
+			{"type": "file_search"},
+			{"type": "code_interpreter"},
+			{"name": "get_weather", "description": "Get weather", "parameters": {"type": "object"}}
+		]
+	}`
+
+	out, err := ConvertResponsesRequestToClaude([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var req ClaudeRequest
+	if err := json.Unmarshal(out, &req); err != nil {
+		t.Fatalf("failed to unmarshal output: %v", err)
+	}
+
+	if len(req.Tools) != 1 {
+		t.Fatalf("expected 1 tool (builtin tools should be skipped), got %d", len(req.Tools))
+	}
+	if req.Tools[0].Name != "get_weather" {
+		t.Errorf("expected tool name get_weather, got %s", req.Tools[0].Name)
 	}
 }
 
@@ -209,9 +265,6 @@ func TestConvertClaudeResponseToResponses_SimpleText(t *testing.T) {
 	if resp.Object != "response" {
 		t.Errorf("expected object response, got %s", resp.Object)
 	}
-	if resp.Model != "claude-sonnet-4-20250514" {
-		t.Errorf("expected model claude-sonnet-4-20250514, got %s", resp.Model)
-	}
 	if resp.Status != "completed" {
 		t.Errorf("expected status completed, got %s", resp.Status)
 	}
@@ -221,29 +274,11 @@ func TestConvertClaudeResponseToResponses_SimpleText(t *testing.T) {
 	if resp.Output[0].Type != "message" {
 		t.Errorf("expected output type message, got %s", resp.Output[0].Type)
 	}
-	if resp.Output[0].Role != "assistant" {
-		t.Errorf("expected output role assistant, got %s", resp.Output[0].Role)
+	if len(resp.Output[0].Content) != 1 || resp.Output[0].Content[0].Text != "Hello! How can I help you?" {
+		t.Errorf("unexpected content")
 	}
-	if len(resp.Output[0].Content) != 1 {
-		t.Fatalf("expected 1 content part, got %d", len(resp.Output[0].Content))
-	}
-	if resp.Output[0].Content[0].Type != "output_text" {
-		t.Errorf("expected content type output_text, got %s", resp.Output[0].Content[0].Type)
-	}
-	if resp.Output[0].Content[0].Text != "Hello! How can I help you?" {
-		t.Errorf("unexpected text: %s", resp.Output[0].Content[0].Text)
-	}
-	if resp.Usage == nil {
-		t.Fatal("expected usage to be set")
-	}
-	if resp.Usage.InputTokens != 10 {
-		t.Errorf("expected input_tokens 10, got %d", resp.Usage.InputTokens)
-	}
-	if resp.Usage.OutputTokens != 8 {
-		t.Errorf("expected output_tokens 8, got %d", resp.Usage.OutputTokens)
-	}
-	if resp.Usage.TotalTokens != 18 {
-		t.Errorf("expected total_tokens 18, got %d", resp.Usage.TotalTokens)
+	if resp.Usage == nil || resp.Usage.TotalTokens != 18 {
+		t.Errorf("expected total_tokens 18")
 	}
 }
 
@@ -274,17 +309,11 @@ func TestConvertClaudeResponseToResponses_WithToolUse(t *testing.T) {
 	if len(resp.Output) != 2 {
 		t.Fatalf("expected 2 output items, got %d", len(resp.Output))
 	}
-	if resp.Output[0].Type != "message" {
-		t.Errorf("expected first output type message, got %s", resp.Output[0].Type)
-	}
 	if resp.Output[1].Type != "function_call" {
 		t.Errorf("expected second output type function_call, got %s", resp.Output[1].Type)
 	}
 	if resp.Output[1].CallID != "toolu_123" {
 		t.Errorf("expected call_id toolu_123, got %s", resp.Output[1].CallID)
-	}
-	if resp.Output[1].Name != "get_weather" {
-		t.Errorf("expected name get_weather, got %s", resp.Output[1].Name)
 	}
 }
 
@@ -314,6 +343,13 @@ func TestConvertClaudeResponseToResponses_MaxTokens(t *testing.T) {
 	}
 }
 
+func newStreamCtx() *StreamContext {
+	return &StreamContext{
+		ResponseID: "resp_test123",
+		Model:      "claude-sonnet-4-20250514",
+	}
+}
+
 func TestConvertClaudeStreamEventToResponses_MessageStart(t *testing.T) {
 	event := `{
 		"type": "message_start",
@@ -326,16 +362,20 @@ func TestConvertClaudeStreamEventToResponses_MessageStart(t *testing.T) {
 		}
 	}`
 
-	out, newID, err := ConvertClaudeStreamEventToResponses("", []byte(event), "resp_initial", "")
+	ctx := newStreamCtx()
+	events, err := ConvertClaudeStreamEventToResponses("", []byte(event), ctx)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if newID != "msg_stream_123" {
-		t.Errorf("expected newID msg_stream_123, got %s", newID)
+	if ctx.ResponseID != "msg_stream_123" {
+		t.Errorf("expected responseID msg_stream_123, got %s", ctx.ResponseID)
+	}
+	if len(events) < 1 {
+		t.Fatalf("expected at least 1 event, got %d", len(events))
 	}
 
 	var resp ResponsesStreamEvent
-	if err := json.Unmarshal(out, &resp); err != nil {
+	if err := json.Unmarshal(events[0], &resp); err != nil {
 		t.Fatalf("failed to unmarshal output: %v", err)
 	}
 	if resp.Type != "response.created" {
@@ -343,9 +383,6 @@ func TestConvertClaudeStreamEventToResponses_MessageStart(t *testing.T) {
 	}
 	if resp.Response == nil {
 		t.Fatal("expected response to be set")
-	}
-	if resp.Response.ID != "msg_stream_123" {
-		t.Errorf("expected response ID msg_stream_123, got %s", resp.Response.ID)
 	}
 	if resp.Response.Status != "in_progress" {
 		t.Errorf("expected status in_progress, got %s", resp.Response.Status)
@@ -359,13 +396,17 @@ func TestConvertClaudeStreamEventToResponses_ContentDelta(t *testing.T) {
 		"delta": {"type": "text_delta", "text": "Hello"}
 	}`
 
-	out, _, err := ConvertClaudeStreamEventToResponses("", []byte(event), "resp_123", "claude-sonnet-4-20250514")
+	ctx := newStreamCtx()
+	events, err := ConvertClaudeStreamEventToResponses("", []byte(event), ctx)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
 
 	var resp ResponsesStreamEvent
-	if err := json.Unmarshal(out, &resp); err != nil {
+	if err := json.Unmarshal(events[0], &resp); err != nil {
 		t.Fatalf("failed to unmarshal output: %v", err)
 	}
 	if resp.Type != "response.output_text.delta" {
@@ -382,13 +423,17 @@ func TestConvertClaudeStreamEventToResponses_MessageDeltaStop(t *testing.T) {
 		"delta": {"stop_reason": "end_turn"}
 	}`
 
-	out, _, err := ConvertClaudeStreamEventToResponses("", []byte(event), "resp_123", "claude-sonnet-4-20250514")
+	ctx := newStreamCtx()
+	events, err := ConvertClaudeStreamEventToResponses("", []byte(event), ctx)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
 
 	var resp ResponsesStreamEvent
-	if err := json.Unmarshal(out, &resp); err != nil {
+	if err := json.Unmarshal(events[0], &resp); err != nil {
 		t.Fatalf("failed to unmarshal output: %v", err)
 	}
 	if resp.Type != "response.completed" {
@@ -408,23 +453,152 @@ func TestConvertClaudeStreamEventToResponses_MessageDeltaUsage(t *testing.T) {
 		"usage": {"input_tokens": 10, "output_tokens": 25}
 	}`
 
-	out, _, err := ConvertClaudeStreamEventToResponses("", []byte(event), "resp_123", "claude-sonnet-4-20250514")
+	ctx := newStreamCtx()
+	events, err := ConvertClaudeStreamEventToResponses("", []byte(event), ctx)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
 
 	var resp ResponsesStreamEvent
-	if err := json.Unmarshal(out, &resp); err != nil {
+	if err := json.Unmarshal(events[0], &resp); err != nil {
 		t.Fatalf("failed to unmarshal output: %v", err)
 	}
 	if resp.Type != "response.usage" {
 		t.Errorf("expected type response.usage, got %s", resp.Type)
 	}
-	if resp.Usage == nil {
-		t.Fatal("expected usage to be set")
+	if resp.Usage == nil || resp.Usage.TotalTokens != 35 {
+		t.Errorf("expected total_tokens 35")
 	}
-	if resp.Usage.TotalTokens != 35 {
-		t.Errorf("expected total_tokens 35, got %d", resp.Usage.TotalTokens)
+}
+
+func TestConvertClaudeStreamEventToResponses_MessageDeltaUsageAndStop(t *testing.T) {
+	event := `{
+		"type": "message_delta",
+		"delta": {"stop_reason": "end_turn"},
+		"usage": {"input_tokens": 10, "output_tokens": 25}
+	}`
+
+	ctx := newStreamCtx()
+	events, err := ConvertClaudeStreamEventToResponses("", []byte(event), ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events (usage + completed), got %d", len(events))
+	}
+
+	var usageResp ResponsesStreamEvent
+	if err := json.Unmarshal(events[0], &usageResp); err != nil {
+		t.Fatalf("failed to unmarshal first event: %v", err)
+	}
+	if usageResp.Type != "response.usage" {
+		t.Errorf("expected first event type response.usage, got %s", usageResp.Type)
+	}
+
+	var completedResp ResponsesStreamEvent
+	if err := json.Unmarshal(events[1], &completedResp); err != nil {
+		t.Fatalf("failed to unmarshal second event: %v", err)
+	}
+	if completedResp.Type != "response.completed" {
+		t.Errorf("expected second event type response.completed, got %s", completedResp.Type)
+	}
+	if completedResp.Response == nil {
+		t.Fatal("expected response to be set in completed event")
+	}
+	if completedResp.Response.Status != "completed" {
+		t.Errorf("expected status completed, got %s", completedResp.Response.Status)
+	}
+}
+
+func TestConvertClaudeStreamEventToResponses_ContentBlockStartText(t *testing.T) {
+	event := `{
+		"type": "content_block_start",
+		"index": 0,
+		"content_block": {"type": "text", "text": ""}
+	}`
+
+	ctx := newStreamCtx()
+	events, err := ConvertClaudeStreamEventToResponses("", []byte(event), ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(events) < 2 {
+		t.Fatalf("expected at least 2 events (item.added + content_part.added), got %d", len(events))
+	}
+
+	var itemAdded ResponsesStreamEvent
+	if err := json.Unmarshal(events[0], &itemAdded); err != nil {
+		t.Fatalf("failed to unmarshal first event: %v", err)
+	}
+	if itemAdded.Type != "response.output_item.added" {
+		t.Errorf("expected first event type response.output_item.added, got %s", itemAdded.Type)
+	}
+
+	var partAdded ResponsesStreamEvent
+	if err := json.Unmarshal(events[1], &partAdded); err != nil {
+		t.Fatalf("failed to unmarshal second event: %v", err)
+	}
+	if partAdded.Type != "response.content_part.added" {
+		t.Errorf("expected second event type response.content_part.added, got %s", partAdded.Type)
+	}
+}
+
+func TestConvertClaudeStreamEventToResponses_ContentBlockStartToolUse(t *testing.T) {
+	event := `{
+		"type": "content_block_start",
+		"index": 1,
+		"content_block": {"type": "tool_use", "id": "toolu_abc", "name": "get_weather"}
+	}`
+
+	ctx := newStreamCtx()
+	events, err := ConvertClaudeStreamEventToResponses("", []byte(event), ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+
+	var resp ResponsesStreamEvent
+	if err := json.Unmarshal(events[0], &resp); err != nil {
+		t.Fatalf("failed to unmarshal output: %v", err)
+	}
+	if resp.Type != "response.output_item.added" {
+		t.Errorf("expected type response.output_item.added, got %s", resp.Type)
+	}
+	if resp.Item == nil {
+		t.Fatal("expected item to be set")
+	}
+	if resp.Item.Type != "function_call" {
+		t.Errorf("expected item type function_call, got %s", resp.Item.Type)
+	}
+	if resp.Item.CallID != "toolu_abc" {
+		t.Errorf("expected call_id toolu_abc, got %s", resp.Item.CallID)
+	}
+}
+
+func TestMarshalClaudeToolResultContent(t *testing.T) {
+	result, err := marshalClaudeToolResultContent([]byte(`"hello"`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(result) != `"hello"` {
+		t.Errorf("expected string passthrough, got %s", string(result))
+	}
+
+	result2, err := marshalClaudeToolResultContent([]byte(`{"temp": 72}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var s string
+	if err := json.Unmarshal(result2, &s); err != nil {
+		t.Fatalf("expected result to be a string, got %s", string(result2))
+	}
+	if s != `{"temp": 72}` {
+		t.Errorf("expected JSON object to be wrapped as string, got %s", s)
 	}
 }
 

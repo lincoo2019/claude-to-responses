@@ -42,10 +42,10 @@ func buildResponsesOutputItems(claudeResp ClaudeResponse) []ResponsesOutputItem 
 			})
 		case "tool_use":
 			functionCalls = append(functionCalls, ResponsesOutputItem{
-				Type:   "function_call",
-				ID:     part.ID,
-				CallID: part.ID,
-				Name:   part.Name,
+				Type:      "function_call",
+				ID:        part.ID,
+				CallID:    part.ID,
+				Name:      part.Name,
 				Arguments: part.Input,
 			})
 		case "tool_result":
@@ -92,7 +92,10 @@ func convertClaudeUsage(in *ClaudeUsage) *ResponsesUsage {
 	if in == nil {
 		return nil
 	}
-	total := in.InputTokens + in.OutputTokens
+	total := 0
+	if in.InputTokens > 0 || in.OutputTokens > 0 {
+		total = in.InputTokens + in.OutputTokens
+	}
 	return &ResponsesUsage{
 		InputTokens:  in.InputTokens,
 		OutputTokens: in.OutputTokens,
@@ -100,137 +103,352 @@ func convertClaudeUsage(in *ClaudeUsage) *ResponsesUsage {
 	}
 }
 
-func ConvertClaudeStreamEventToResponses(eventType string, body []byte, responseID string, model string) ([]byte, string, error) {
+type StreamContext struct {
+	ResponseID    string
+	Model         string
+	AccumulatedText string
+	ToolCalls     []ResponsesOutputItem
+	ToolArgsMap   map[string]string
+	CurrentBlockType string
+	CurrentToolID    string
+	CurrentToolName  string
+}
+
+func ConvertClaudeStreamEventToResponses(eventType string, body []byte, ctx *StreamContext) ([][]byte, error) {
 	var claudeEvent ClaudeStreamEvent
 	if err := jsonx.Unmarshal(body, &claudeEvent); err != nil {
-		return nil, "", fmt.Errorf("decode claude stream event: %w", err)
+		return nil, fmt.Errorf("decode claude stream event: %w", err)
 	}
 
 	switch claudeEvent.Type {
 	case "message_start":
-		newRespID := responseID
-		newModel := model
 		if claudeEvent.Message != nil {
 			if claudeEvent.Message.ID != "" {
-				newRespID = claudeEvent.Message.ID
+				ctx.ResponseID = claudeEvent.Message.ID
 			}
 			if claudeEvent.Message.Model != "" {
-				newModel = claudeEvent.Message.Model
+				ctx.Model = claudeEvent.Message.Model
 			}
 		}
-		respEvent := ResponsesStreamEvent{
+
+		var events [][]byte
+
+		createdEvent := ResponsesStreamEvent{
 			Type:       "response.created",
-			ResponseID: newRespID,
-			Response: &struct {
-				ID     string          `json:"id,omitempty"`
-				Object string          `json:"object,omitempty"`
-				Model  string          `json:"model,omitempty"`
-				Status string          `json:"status,omitempty"`
-				Usage  *ResponsesUsage `json:"usage,omitempty"`
-			}{
-				ID:     newRespID,
+			ResponseID: ctx.ResponseID,
+			Response: &ResponsesEventResp{
+				ID:     ctx.ResponseID,
 				Object: "response",
-				Model:  newModel,
+				Model:  ctx.Model,
 				Status: "in_progress",
 				Usage:  convertClaudeUsage(claudeEvent.Message.Usage),
 			},
 		}
-		out, err := jsonx.Marshal(respEvent)
-		return out, newRespID, err
+		out, err := jsonx.Marshal(createdEvent)
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, out)
+
+		inProgressEvent := ResponsesStreamEvent{
+			Type:       "response.in_progress",
+			ResponseID: ctx.ResponseID,
+			Response: &ResponsesEventResp{
+				ID:     ctx.ResponseID,
+				Object: "response",
+				Model:  ctx.Model,
+				Status: "in_progress",
+			},
+		}
+		out2, err := jsonx.Marshal(inProgressEvent)
+		if err != nil {
+			return events, err
+		}
+		events = append(events, out2)
+
+		return events, nil
 
 	case "content_block_start":
-		if claudeEvent.Content != nil && claudeEvent.Content.Type == "tool_use" {
-			itemEvent := ResponsesStreamEvent{
-				Type:       "response.output_item.added",
-				ResponseID: responseID,
-				ItemID:     claudeEvent.Content.ID,
-				OutputIndex: claudeEvent.Index,
+		if claudeEvent.Content != nil {
+			ctx.CurrentBlockType = claudeEvent.Content.Type
+
+			switch claudeEvent.Content.Type {
+			case "text":
+				itemAdded := ResponsesStreamEvent{
+					Type:        "response.output_item.added",
+					ResponseID:  ctx.ResponseID,
+					OutputIndex: claudeEvent.Index,
+					Item: &ResponsesOutputItem{
+						Type:   "message",
+						ID:     ctx.ResponseID + "-msg",
+						Role:   "assistant",
+						Status: "in_progress",
+						Content: []ResponsesContentPart{},
+					},
+				}
+				out, err := jsonx.Marshal(itemAdded)
+				if err != nil {
+					return nil, err
+				}
+
+				partAdded := ResponsesStreamEvent{
+					Type:         "response.content_part.added",
+					ResponseID:   ctx.ResponseID,
+					ItemID:       ctx.ResponseID + "-msg",
+					OutputIndex:  claudeEvent.Index,
+					ContentIndex: 0,
+					Part: &ResponsesContentRef{
+						Type:  "output_text",
+						Index: 0,
+					},
+				}
+				out2, err := jsonx.Marshal(partAdded)
+				if err != nil {
+					return [][]byte{out}, err
+				}
+
+				return [][]byte{out, out2}, nil
+
+			case "tool_use":
+				ctx.CurrentToolID = claudeEvent.Content.ID
+				ctx.CurrentToolName = claudeEvent.Content.Name
+				if ctx.ToolArgsMap == nil {
+					ctx.ToolArgsMap = make(map[string]string)
+				}
+				ctx.ToolArgsMap[claudeEvent.Content.ID] = ""
+
+				itemAdded := ResponsesStreamEvent{
+					Type:        "response.output_item.added",
+					ResponseID:  ctx.ResponseID,
+					OutputIndex: claudeEvent.Index,
+					Item: &ResponsesOutputItem{
+						Type:   "function_call",
+						ID:     claudeEvent.Content.ID,
+						CallID: claudeEvent.Content.ID,
+						Name:   claudeEvent.Content.Name,
+						Status: "in_progress",
+					},
+				}
+				out, err := jsonx.Marshal(itemAdded)
+				if err != nil {
+					return nil, err
+				}
+				return [][]byte{out}, nil
 			}
-			out, err := jsonx.Marshal(itemEvent)
-			return out, responseID, err
-		}
-		if claudeEvent.Content != nil && claudeEvent.Content.Type == "text" {
-			itemEvent := ResponsesStreamEvent{
-				Type:        "response.output_item.added",
-				ResponseID:  responseID,
-				ItemID:      responseID + "-msg",
-				OutputIndex: claudeEvent.Index,
-			}
-			out, err := jsonx.Marshal(itemEvent)
-			return out, responseID, err
 		}
 
 	case "content_block_delta":
-		if claudeEvent.Delta != nil && claudeEvent.Delta.Type == "text_delta" {
-			deltaEvent := ResponsesStreamEvent{
-				Type:         "response.output_text.delta",
-				ResponseID:   responseID,
-				ItemID:       responseID + "-msg",
-				Delta:        claudeEvent.Delta.Text,
-				OutputIndex:  claudeEvent.Index,
-				ContentIndex: 0,
+		if claudeEvent.Delta != nil {
+			switch claudeEvent.Delta.Type {
+			case "text_delta":
+				ctx.AccumulatedText += claudeEvent.Delta.Text
+
+				deltaEvent := ResponsesStreamEvent{
+					Type:         "response.output_text.delta",
+					ResponseID:   ctx.ResponseID,
+					ItemID:       ctx.ResponseID + "-msg",
+					OutputIndex:  claudeEvent.Index,
+					ContentIndex: 0,
+					Delta:        claudeEvent.Delta.Text,
+				}
+				out, err := jsonx.Marshal(deltaEvent)
+				if err != nil {
+					return nil, err
+				}
+				return [][]byte{out}, nil
+
+			case "input_json_delta":
+				if ctx.CurrentToolID != "" {
+					ctx.ToolArgsMap[ctx.CurrentToolID] += claudeEvent.Delta.Text
+				}
+
+				deltaEvent := ResponsesStreamEvent{
+					Type:        "response.function_call_arguments.delta",
+					ResponseID:  ctx.ResponseID,
+					ItemID:      ctx.CurrentToolID,
+					Delta:       claudeEvent.Delta.Text,
+					OutputIndex: claudeEvent.Index,
+				}
+				out, err := jsonx.Marshal(deltaEvent)
+				if err != nil {
+					return nil, err
+				}
+				return [][]byte{out}, nil
 			}
-			out, err := jsonx.Marshal(deltaEvent)
-			return out, responseID, err
-		}
-		if claudeEvent.Delta != nil && claudeEvent.Delta.Type == "input_json_delta" {
-			deltaEvent := ResponsesStreamEvent{
-				Type:        "response.function_call_arguments.delta",
-				ResponseID:  responseID,
-				ItemID:      "",
-				Delta:       claudeEvent.Delta.Text,
-				OutputIndex: claudeEvent.Index,
-			}
-			out, err := jsonx.Marshal(deltaEvent)
-			return out, responseID, err
 		}
 
 	case "content_block_stop":
-		stopEvent := ResponsesStreamEvent{
-			Type:        "response.output_text.done",
-			ResponseID:  responseID,
-			ItemID:      responseID + "-msg",
-			OutputIndex: claudeEvent.Index,
+		var events [][]byte
+
+		switch ctx.CurrentBlockType {
+		case "text":
+			textDone := ResponsesStreamEvent{
+				Type:         "response.output_text.done",
+				ResponseID:   ctx.ResponseID,
+				ItemID:       ctx.ResponseID + "-msg",
+				OutputIndex:  claudeEvent.Index,
+				ContentIndex: 0,
+				Part: &ResponsesContentRef{
+					Type: "output_text",
+					Text: ctx.AccumulatedText,
+				},
+			}
+			out, err := jsonx.Marshal(textDone)
+			if err != nil {
+				return nil, err
+			}
+			events = append(events, out)
+
+			partDone := ResponsesStreamEvent{
+				Type:         "response.content_part.done",
+				ResponseID:   ctx.ResponseID,
+				ItemID:       ctx.ResponseID + "-msg",
+				OutputIndex:  claudeEvent.Index,
+				ContentIndex: 0,
+				Part: &ResponsesContentRef{
+					Type: "output_text",
+					Text: ctx.AccumulatedText,
+				},
+			}
+			out2, err := jsonx.Marshal(partDone)
+			if err != nil {
+				return events, err
+			}
+			events = append(events, out2)
+
+			itemDone := ResponsesStreamEvent{
+				Type:        "response.output_item.done",
+				ResponseID:  ctx.ResponseID,
+				ItemID:      ctx.ResponseID + "-msg",
+				OutputIndex: claudeEvent.Index,
+				Item: &ResponsesOutputItem{
+					Type:   "message",
+					ID:     ctx.ResponseID + "-msg",
+					Role:   "assistant",
+					Status: "completed",
+					Content: []ResponsesContentPart{
+						{Type: "output_text", Text: ctx.AccumulatedText},
+					},
+				},
+			}
+			out3, err := jsonx.Marshal(itemDone)
+			if err != nil {
+				return events, err
+			}
+			events = append(events, out3)
+
+		case "tool_use":
+			args := ""
+			if ctx.CurrentToolID != "" {
+				args = ctx.ToolArgsMap[ctx.CurrentToolID]
+			}
+
+			argsDone := ResponsesStreamEvent{
+				Type:        "response.function_call_arguments.done",
+				ResponseID:  ctx.ResponseID,
+				ItemID:      ctx.CurrentToolID,
+				OutputIndex: claudeEvent.Index,
+				Delta:       args,
+			}
+			out, err := jsonx.Marshal(argsDone)
+			if err != nil {
+				return nil, err
+			}
+			events = append(events, out)
+
+			toolItem := ResponsesOutputItem{
+				Type:      "function_call",
+				ID:        ctx.CurrentToolID,
+				CallID:    ctx.CurrentToolID,
+				Name:      ctx.CurrentToolName,
+				Arguments: json.RawMessage(args),
+				Status:    "completed",
+			}
+			ctx.ToolCalls = append(ctx.ToolCalls, toolItem)
+
+			itemDone := ResponsesStreamEvent{
+				Type:        "response.output_item.done",
+				ResponseID:  ctx.ResponseID,
+				ItemID:      ctx.CurrentToolID,
+				OutputIndex: claudeEvent.Index,
+				Item:        &toolItem,
+			}
+			out2, err := jsonx.Marshal(itemDone)
+			if err != nil {
+				return events, err
+			}
+			events = append(events, out2)
+
+			ctx.CurrentToolID = ""
+			ctx.CurrentToolName = ""
 		}
-		out, err := jsonx.Marshal(stopEvent)
-		return out, responseID, err
+
+		ctx.CurrentBlockType = ""
+		return events, nil
 
 	case "message_delta":
+		var events [][]byte
+
 		if claudeEvent.Usage != nil {
 			usageEvent := ResponsesStreamEvent{
 				Type:       "response.usage",
-				ResponseID: responseID,
+				ResponseID: ctx.ResponseID,
 				Usage:      convertClaudeUsage(claudeEvent.Usage),
 			}
 			out, err := jsonx.Marshal(usageEvent)
-			return out, responseID, err
+			if err != nil {
+				return nil, err
+			}
+			events = append(events, out)
 		}
+
 		if claudeEvent.Delta != nil && claudeEvent.Delta.StopReason != "" {
+			outputItems := buildCurrentOutputItems(ctx)
+
 			completedEvent := ResponsesStreamEvent{
 				Type:       "response.completed",
-				ResponseID: responseID,
-				Response: &struct {
-					ID     string          `json:"id,omitempty"`
-					Object string          `json:"object,omitempty"`
-					Model  string          `json:"model,omitempty"`
-					Status string          `json:"status,omitempty"`
-					Usage  *ResponsesUsage `json:"usage,omitempty"`
-				}{
-					ID:     responseID,
+				ResponseID: ctx.ResponseID,
+				Response: &ResponsesEventResp{
+					ID:     ctx.ResponseID,
 					Object: "response",
-					Model:  model,
+					Model:  ctx.Model,
 					Status: convertStopReason(claudeEvent.Delta.StopReason),
+					Output: outputItems,
+					Usage:  convertClaudeUsage(claudeEvent.Usage),
 				},
 			}
 			out, err := jsonx.Marshal(completedEvent)
-			return out, responseID, err
+			if err != nil {
+				return events, err
+			}
+			events = append(events, out)
 		}
 
+		return events, nil
+
 	case "message_stop":
-		return nil, responseID, nil
+		return nil, nil
 	}
 
-	return nil, responseID, nil
+	return nil, nil
+}
+
+func buildCurrentOutputItems(ctx *StreamContext) []ResponsesOutputItem {
+	var items []ResponsesOutputItem
+
+	if ctx.AccumulatedText != "" {
+		items = append(items, ResponsesOutputItem{
+			Type:    "message",
+			ID:      ctx.ResponseID + "-msg",
+			Role:    "assistant",
+			Status:  "completed",
+			Content: []ResponsesContentPart{{Type: "output_text", Text: ctx.AccumulatedText}},
+		})
+	}
+
+	items = append(items, ctx.ToolCalls...)
+
+	return items
 }
 
 func IsClaudeStreamDone(body []byte) bool {
