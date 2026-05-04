@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -24,6 +25,7 @@ type Config struct {
 	ClaudeAPIKey  string
 	ClaudeBaseURL string
 	ListenAddr    string
+	configPath    string
 }
 
 func (c *Config) GetAPIKey() string {
@@ -47,6 +49,7 @@ func (c *Config) Set(apiKey, baseURL string) {
 	if baseURL != "" {
 		c.ClaudeBaseURL = baseURL
 	}
+	c.saveLocked()
 }
 
 func (c *Config) Snapshot() (apiKey, baseURL string) {
@@ -55,11 +58,67 @@ func (c *Config) Snapshot() (apiKey, baseURL string) {
 	return c.ClaudeAPIKey, c.ClaudeBaseURL
 }
 
+type configFile struct {
+	ClaudeAPIKey  string `json:"claude_api_key"`
+	ClaudeBaseURL string `json:"claude_base_url"`
+}
+
+func (c *Config) saveLocked() {
+	if c.configPath == "" {
+		return
+	}
+	data := configFile{
+		ClaudeAPIKey:  c.ClaudeAPIKey,
+		ClaudeBaseURL: c.ClaudeBaseURL,
+	}
+	raw, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		log.Printf("Error marshaling config: %v", err)
+		return
+	}
+	dir := filepath.Dir(c.configPath)
+	os.MkdirAll(dir, 0700)
+	if err := os.WriteFile(c.configPath, raw, 0600); err != nil {
+		log.Printf("Error saving config: %v", err)
+	}
+}
+
+func (c *Config) loadFromFile() {
+	if c.configPath == "" {
+		return
+	}
+	raw, err := os.ReadFile(c.configPath)
+	if err != nil {
+		return
+	}
+	var data configFile
+	if err := json.Unmarshal(raw, &data); err != nil {
+		log.Printf("Error parsing config file: %v", err)
+		return
+	}
+	if data.ClaudeAPIKey != "" {
+		c.ClaudeAPIKey = data.ClaudeAPIKey
+	}
+	if data.ClaudeBaseURL != "" {
+		c.ClaudeBaseURL = data.ClaudeBaseURL
+	}
+}
+
+func configFilePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".claude-to-responses", "config.json")
+}
+
 func loadConfig() *Config {
+	cfgPath := configFilePath()
 	cfg := &Config{
 		ClaudeAPIKey:  os.Getenv("CLAUDE_API_KEY"),
 		ClaudeBaseURL: os.Getenv("CLAUDE_BASE_URL"),
 		ListenAddr:    os.Getenv("LISTEN_ADDR"),
+		configPath:    cfgPath,
 	}
 	if cfg.ClaudeBaseURL == "" {
 		cfg.ClaudeBaseURL = "https://api.anthropic.com"
@@ -67,6 +126,16 @@ func loadConfig() *Config {
 	if cfg.ListenAddr == "" {
 		cfg.ListenAddr = ":8080"
 	}
+
+	cfg.loadFromFile()
+
+	if envKey := os.Getenv("CLAUDE_API_KEY"); envKey != "" {
+		cfg.ClaudeAPIKey = envKey
+	}
+	if envURL := os.Getenv("CLAUDE_BASE_URL"); envURL != "" {
+		cfg.ClaudeBaseURL = envURL
+	}
+
 	return cfg
 }
 
