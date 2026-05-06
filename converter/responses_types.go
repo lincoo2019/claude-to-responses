@@ -5,6 +5,7 @@ import "encoding/json"
 type ResponsesRequest struct {
 	Model           string           `json:"model"`
 	Input           json.RawMessage  `json:"input"`
+	Instructions    json.RawMessage  `json:"instructions,omitempty"`
 	Temperature     *float64         `json:"temperature,omitempty"`
 	TopP            *float64         `json:"top_p,omitempty"`
 	MaxOutputTokens *int             `json:"max_output_tokens,omitempty"`
@@ -52,7 +53,7 @@ type ResponsesOutputItem struct {
 	Status    string                 `json:"status,omitempty"`
 	Name      string                 `json:"name,omitempty"`
 	CallID    string                 `json:"call_id,omitempty"`
-	Arguments json.RawMessage        `json:"arguments,omitempty"`
+	Arguments string                 `json:"arguments,omitempty"`
 	Output    json.RawMessage        `json:"output,omitempty"`
 	Content   []ResponsesContentPart `json:"content,omitempty"`
 }

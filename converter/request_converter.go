@@ -80,6 +80,34 @@ func ConvertResponsesRequestToClaude(body []byte) ([]byte, error) {
 		claudeReq.System = raw
 	}
 
+	if req.Instructions != nil && len(req.Instructions) > 0 {
+		var instrStr string
+		switch jsonx.FirstNonSpaceByte(req.Instructions) {
+		case '"':
+			if err := jsonx.Unmarshal(req.Instructions, &instrStr); err != nil {
+				return nil, fmt.Errorf("decode instructions string: %w", err)
+			}
+		default:
+			instrStr = string(req.Instructions)
+		}
+		if instrStr != "" {
+			if len(systemTexts) > 0 {
+				existing := string(claudeReq.System)
+				combined, err := jsonx.Marshal(instrStr + "\n\n" + existing)
+				if err != nil {
+					return nil, err
+				}
+				claudeReq.System = combined
+			} else {
+				raw, err := jsonx.Marshal(instrStr)
+				if err != nil {
+					return nil, err
+				}
+				claudeReq.System = raw
+			}
+		}
+	}
+
 	claudeReq.Messages = messages
 
 	if len(req.Tools) > 0 {

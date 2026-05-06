@@ -47,7 +47,7 @@ func buildResponsesOutputItems(claudeResp ClaudeResponse) []ResponsesOutputItem 
 				ID:        part.ID,
 				CallID:    part.ID,
 				Name:      part.Name,
-				Arguments: part.Input,
+				Arguments: string(part.Input),
 			})
 		case "tool_result":
 			functionCalls = append(functionCalls, ResponsesOutputItem{
@@ -386,7 +386,7 @@ func ConvertClaudeStreamEventToResponses(eventType string, body []byte, ctx *Str
 				ID:        ctx.CurrentToolID,
 				CallID:    ctx.CurrentToolID,
 				Name:      ctx.CurrentToolName,
-				Arguments: json.RawMessage(args),
+				Arguments: args,
 				Status:    "completed",
 			}
 			ctx.ToolCalls = append(ctx.ToolCalls, toolItem)
@@ -429,8 +429,9 @@ func ConvertClaudeStreamEventToResponses(eventType string, body []byte, ctx *Str
 		}
 
 		if claudeEvent.Delta != nil && claudeEvent.Delta.StopReason != "" {
-			outputItems := buildCurrentOutputItems(ctx)
-			endTurn := true
+			outputItems := BuildCurrentOutputItems(ctx)
+			hasToolCalls := len(ctx.ToolCalls) > 0
+			endTurn := !hasToolCalls
 
 			completedEvent := ResponsesStreamEvent{
 				Type:       "response.completed",
@@ -460,8 +461,9 @@ func ConvertClaudeStreamEventToResponses(eventType string, body []byte, ctx *Str
 		if ctx.CompletedSent {
 			return nil, nil
 		}
-		outputItems := buildCurrentOutputItems(ctx)
-		endTurn := true
+		outputItems := BuildCurrentOutputItems(ctx)
+		hasToolCalls := len(ctx.ToolCalls) > 0
+		endTurn := !hasToolCalls
 		usage := ctx.LastUsage
 		if usage == nil {
 			usage = &ResponsesUsage{}
@@ -491,7 +493,7 @@ func ConvertClaudeStreamEventToResponses(eventType string, body []byte, ctx *Str
 	return nil, nil
 }
 
-func buildCurrentOutputItems(ctx *StreamContext) []ResponsesOutputItem {
+func BuildCurrentOutputItems(ctx *StreamContext) []ResponsesOutputItem {
 	var items []ResponsesOutputItem
 
 	msgItemID := ctx.ClaudeMsgID

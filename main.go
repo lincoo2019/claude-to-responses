@@ -217,7 +217,7 @@ func main() {
 		Addr:         cfg.ListenAddr,
 		Handler:      mux,
 		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 300 * time.Second,
+		WriteTimeout: 0,
 		IdleTimeout:  120 * time.Second,
 	}
 
@@ -313,9 +313,7 @@ func maskAPIKey(key string) string {
 }
 
 func handleResponses(cfg *Config) http.HandlerFunc {
-	client := &http.Client{
-		Timeout: 300 * time.Second,
-	}
+	client := &http.Client{}
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -474,13 +472,37 @@ func handleStreamResponse(w http.ResponseWriter, resp *http.Response, r *http.Re
 		ResponseID: responseID,
 	}
 
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	reader := bufio.NewReaderSize(resp.Body, 64*1024)
+	eventCount := 0
+	convertedCount := 0
 
-	for scanner.Scan() {
-		line := scanner.Text()
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				if line == "" {
+					log.Printf("Stream ended: backend EOF after %d backend events, %d converted events", eventCount, convertedCount)
+					break
+				}
+			} else {
+				if r.Context().Err() != nil {
+					log.Printf("Client disconnected during stream: %v (after %d backend events, %d converted)", r.Context().Err(), eventCount, convertedCount)
+				} else {
+					log.Printf("Error reading backend stream: %v (after %d backend events, %d converted)", err, eventCount, convertedCount)
+				}
+				break
+			}
+		}
+
+		line = strings.TrimRight(line, "\r\n")
+		if line == "" {
+			continue
+		}
 
 		if !strings.HasPrefix(line, "data:") && !strings.HasPrefix(line, "data: ") {
+			if strings.HasPrefix(line, "event:") {
+				continue
+			}
 			continue
 		}
 
@@ -489,30 +511,34 @@ func handleStreamResponse(w http.ResponseWriter, resp *http.Response, r *http.Re
 		payload = strings.TrimSpace(payload)
 
 		if payload == "[DONE]" {
+			log.Printf("Stream [DONE] received after %d backend events, %d converted events", eventCount, convertedCount)
 			fmt.Fprintf(w, "data: [DONE]\n\n")
 			flusher.Flush()
 			break
 		}
 
+		eventCount++
+
 		var converted [][]byte
-		var err error
+		var convErr error
 
 		switch apiFormat {
 		case "claude":
-			converted, err = converter.ConvertClaudeStreamEventToResponses(
+			converted, convErr = converter.ConvertClaudeStreamEventToResponses(
 				"", []byte(payload), ctx,
 			)
 		default:
-			converted, err = converter.ConvertOpenAIStreamChunkToResponses(
+			converted, convErr = converter.ConvertOpenAIStreamChunkToResponses(
 				[]byte(payload), ctx,
 			)
 		}
-		if err != nil {
-			log.Printf("Error converting stream event: %v", err)
+		if convErr != nil {
+			log.Printf("Error converting stream event #%d: %v, payload: %s", eventCount, convErr, payload)
 			continue
 		}
 
 		for _, event := range converted {
+			convertedCount++
 			eventType := converter.ExtractResponsesEventType(event)
 			if eventType != "" {
 				fmt.Fprintf(w, "event: %s\n", eventType)
@@ -522,12 +548,32 @@ func handleStreamResponse(w http.ResponseWriter, resp *http.Response, r *http.Re
 		}
 	}
 
-	if err := scanner.Err(); err != nil {
-		if r.Context().Err() != nil {
-			log.Printf("Client disconnected during stream: %v", r.Context().Err())
-		} else {
-			log.Printf("Error reading backend stream: %v", err)
+	if !ctx.CompletedSent {
+		log.Printf("WARNING: stream ended without response.completed being sent! Force sending...")
+		outputItems := converter.BuildCurrentOutputItems(ctx)
+		hasToolCalls := len(ctx.ToolCalls) > 0
+		endTurn := !hasToolCalls
+		forceCompleted := converter.ResponsesStreamEvent{
+			Type:       "response.completed",
+			ResponseID: ctx.ResponseID,
+			Response: &converter.ResponsesEventResp{
+				ID:        ctx.ResponseID,
+				Object:    "response",
+				Model:     ctx.Model,
+				Status:    "completed",
+				Output:    outputItems,
+				Usage:     &converter.ResponsesUsage{},
+				CreatedAd: ctx.CreatedAt,
+				EndTurn:   &endTurn,
+			},
 		}
+		out, err := json.Marshal(forceCompleted)
+		if err == nil {
+			fmt.Fprintf(w, "event: response.completed\ndata: %s\n\n", out)
+			flusher.Flush()
+		}
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
 	}
 }
 

@@ -133,6 +133,25 @@ func ConvertResponsesRequestToOpenAIChat(body []byte) ([]byte, error) {
 		}}, messages...)
 	}
 
+	if req.Instructions != nil && len(req.Instructions) > 0 {
+		var instrStr string
+		switch jsonx.FirstNonSpaceByte(req.Instructions) {
+		case '"':
+			if err := jsonx.Unmarshal(req.Instructions, &instrStr); err != nil {
+				return nil, fmt.Errorf("decode instructions string: %w", err)
+			}
+		default:
+			instrStr = string(req.Instructions)
+		}
+		if instrStr != "" {
+			sysContent, _ := jsonx.Marshal(instrStr)
+			messages = append([]OpenAIChatMessage{{
+				Role:    "system",
+				Content: sysContent,
+			}}, messages...)
+		}
+	}
+
 	chatReq.Messages = messages
 
 	if len(req.Tools) > 0 {
@@ -257,7 +276,7 @@ func ConvertOpenAIChatResponseToResponses(body []byte) ([]byte, error) {
 				ID:        tc.ID,
 				CallID:    tc.ID,
 				Name:      tc.Function.Name,
-				Arguments: json.RawMessage(tc.Function.Arguments),
+				Arguments: tc.Function.Arguments,
 			})
 		}
 
@@ -541,7 +560,7 @@ func ConvertOpenAIStreamChunkToResponses(body []byte, ctx *StreamContext) ([][]b
 				ID:        ctx.CurrentToolID,
 				CallID:    ctx.CurrentToolID,
 				Name:      ctx.CurrentToolName,
-				Arguments: json.RawMessage(args),
+				Arguments: args,
 				Status:    "completed",
 			}
 			ctx.ToolCalls = append(ctx.ToolCalls, toolItem)
@@ -565,7 +584,7 @@ func ConvertOpenAIStreamChunkToResponses(body []byte, ctx *StreamContext) ([][]b
 			status = "incomplete"
 		}
 
-		outputItems := buildCurrentOutputItems(ctx)
+		outputItems := BuildCurrentOutputItems(ctx)
 		endTurn := true
 		completedEvent := ResponsesStreamEvent{
 			Type:       "response.completed",
