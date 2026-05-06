@@ -231,7 +231,11 @@ func ConvertClaudeStreamEventToResponses(eventType string, body []byte, ctx *Str
 				if ctx.ToolArgsMap == nil {
 					ctx.ToolArgsMap = make(map[string]string)
 				}
-				ctx.ToolArgsMap[claudeEvent.Content.ID] = ""
+				if claudeEvent.Content.Input != nil && len(claudeEvent.Content.Input) > 2 {
+					ctx.ToolArgsMap[claudeEvent.Content.ID] = string(claudeEvent.Content.Input)
+				} else {
+					ctx.ToolArgsMap[claudeEvent.Content.ID] = ""
+				}
 
 				itemAdded := ResponsesStreamEvent{
 					Type:        "response.output_item.added",
@@ -281,15 +285,19 @@ func ConvertClaudeStreamEventToResponses(eventType string, body []byte, ctx *Str
 				return [][]byte{out}, nil
 
 			case "input_json_delta":
+				jsonChunk := claudeEvent.Delta.PartialJSON
+				if jsonChunk == "" {
+					jsonChunk = claudeEvent.Delta.Text
+				}
 				if ctx.CurrentToolID != "" {
-					ctx.ToolArgsMap[ctx.CurrentToolID] += claudeEvent.Delta.Text
+					ctx.ToolArgsMap[ctx.CurrentToolID] += jsonChunk
 				}
 
 				deltaEvent := ResponsesStreamEvent{
 					Type:        "response.function_call_arguments.delta",
 					ResponseID:  ctx.ResponseID,
 					ItemID:      ctx.CurrentToolID,
-					Delta:       claudeEvent.Delta.Text,
+					Delta:       jsonChunk,
 					OutputIndex: claudeEvent.Index,
 				}
 				out, err := jsonx.Marshal(deltaEvent)

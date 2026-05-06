@@ -69,7 +69,8 @@ type ClaudeStreamEvent struct {
 }
 
 type ClaudeStreamDelta struct {
-	Type       string `json:"type,omitempty"`
-	Text       string `json:"text,omitempty"`
-	StopReason string `json:"stop_reason,omitempty"`
+	Type         string `json:"type,omitempty"`
+	Text         string `json:"text,omitempty"`
+	PartialJSON  string `json:"partial_json,omitempty"`
+	StopReason   string `json:"stop_reason,omitempty"`
 }

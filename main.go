@@ -555,8 +555,10 @@ func handleStreamResponse(w http.ResponseWriter, resp *http.Response, r *http.Re
 		var rawEvt struct {
 			Type    string `json:"type"`
 			Content *struct {
-				Type string `json:"type"`
-				Name string `json:"name"`
+				Type  string          `json:"type"`
+				Name  string          `json:"name"`
+				ID    string          `json:"id"`
+				Input json.RawMessage `json:"input"`
 			} `json:"content_block,omitempty"`
 			Delta *struct {
 				Type       string `json:"type"`
@@ -565,7 +567,12 @@ func handleStreamResponse(w http.ResponseWriter, resp *http.Response, r *http.Re
 		}
 		if json.Unmarshal([]byte(payload), &rawEvt) == nil {
 			if rawEvt.Type == "content_block_start" && rawEvt.Content != nil {
-				log.Printf("  [backend] content_block_start: type=%s name=%s", rawEvt.Content.Type, rawEvt.Content.Name)
+				if rawEvt.Content.Type == "tool_use" {
+					hasInput := rawEvt.Content.Input != nil && len(rawEvt.Content.Input) > 2
+					log.Printf("  [backend] content_block_start: type=tool_use name=%s id=%s has_input=%v input=%s", rawEvt.Content.Name, rawEvt.Content.ID, hasInput, string(rawEvt.Content.Input))
+				} else {
+					log.Printf("  [backend] content_block_start: type=%s name=%s", rawEvt.Content.Type, rawEvt.Content.Name)
+				}
 			} else if rawEvt.Type == "message_delta" && rawEvt.Delta != nil && rawEvt.Delta.StopReason != "" {
 				log.Printf("  [backend] message_delta: stop_reason=%s", rawEvt.Delta.StopReason)
 			}
@@ -574,6 +581,19 @@ func handleStreamResponse(w http.ResponseWriter, resp *http.Response, r *http.Re
 		for _, event := range converted {
 			convertedCount++
 			eventType := converter.ExtractResponsesEventType(event)
+			if eventType == "response.output_item.done" {
+				var itemEvt struct {
+					Item struct {
+						Type      string `json:"type"`
+						Name      string `json:"name"`
+						CallID    string `json:"call_id"`
+						Arguments string `json:"arguments"`
+					} `json:"item"`
+				}
+				if json.Unmarshal(event, &itemEvt) == nil && itemEvt.Item.Type == "function_call" {
+					log.Printf("  [output] function_call: name=%s call_id=%s args_len=%d args=%s", itemEvt.Item.Name, itemEvt.Item.CallID, len(itemEvt.Item.Arguments), itemEvt.Item.Arguments)
+				}
+			}
 			if clientDisconnected {
 				continue
 			}
