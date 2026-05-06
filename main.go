@@ -28,6 +28,7 @@ type Config struct {
 	configPath    string
 	ModelMapping  map[string]string
 	DefaultModel  string
+	APIFormat     string
 }
 
 func (c *Config) GetAPIKey() string {
@@ -54,6 +55,15 @@ func (c *Config) Set(apiKey, baseURL string) {
 	c.saveLocked()
 }
 
+func (c *Config) GetAPIFormat() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.APIFormat == "" {
+		return "claude"
+	}
+	return c.APIFormat
+}
+
 func (c *Config) MapModel(model string) string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -68,22 +78,25 @@ func (c *Config) MapModel(model string) string {
 	return model
 }
 
-func (c *Config) SetModelMapping(mapping map[string]string, defaultModel string) {
+func (c *Config) SetModelMapping(mapping map[string]string, defaultModel string, apiFormat string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.ModelMapping = mapping
 	c.DefaultModel = defaultModel
+	if apiFormat != "" {
+		c.APIFormat = apiFormat
+	}
 	c.saveLocked()
 }
 
-func (c *Config) GetModelMapping() (map[string]string, string) {
+func (c *Config) GetModelMapping() (map[string]string, string, string) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	mapping := make(map[string]string)
 	for k, v := range c.ModelMapping {
 		mapping[k] = v
 	}
-	return mapping, c.DefaultModel
+	return mapping, c.DefaultModel, c.GetAPIFormat()
 }
 
 func (c *Config) Snapshot() (apiKey, baseURL string) {
@@ -97,6 +110,7 @@ type configFile struct {
 	ClaudeBaseURL string            `json:"claude_base_url"`
 	ModelMapping  map[string]string `json:"model_mapping,omitempty"`
 	DefaultModel  string            `json:"default_model,omitempty"`
+	APIFormat     string            `json:"api_format,omitempty"`
 }
 
 func (c *Config) saveLocked() {
@@ -108,6 +122,7 @@ func (c *Config) saveLocked() {
 		ClaudeBaseURL: c.ClaudeBaseURL,
 		ModelMapping:  c.ModelMapping,
 		DefaultModel:  c.DefaultModel,
+		APIFormat:     c.APIFormat,
 	}
 	raw, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
@@ -145,6 +160,9 @@ func (c *Config) loadFromFile() {
 	}
 	if data.DefaultModel != "" {
 		c.DefaultModel = data.DefaultModel
+	}
+	if data.APIFormat != "" {
+		c.APIFormat = data.APIFormat
 	}
 }
 
@@ -237,12 +255,13 @@ func handleSettings(cfg *Config) http.HandlerFunc {
 		switch r.Method {
 		case http.MethodGet:
 			apiKey, baseURL := cfg.Snapshot()
-			mapping, defaultModel := cfg.GetModelMapping()
+			mapping, defaultModel, apiFormat := cfg.GetModelMapping()
 			json.NewEncoder(w).Encode(map[string]any{
 				"claude_api_key":  maskAPIKey(apiKey),
 				"claude_base_url": baseURL,
 				"model_mapping":   mapping,
 				"default_model":   defaultModel,
+				"api_format":      apiFormat,
 			})
 
 		case http.MethodPost:
@@ -251,6 +270,7 @@ func handleSettings(cfg *Config) http.HandlerFunc {
 				ClaudeBaseURL string            `json:"claude_base_url"`
 				ModelMapping  map[string]string `json:"model_mapping"`
 				DefaultModel  string            `json:"default_model"`
+				APIFormat     string            `json:"api_format"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				w.WriteHeader(http.StatusBadRequest)
@@ -258,23 +278,20 @@ func handleSettings(cfg *Config) http.HandlerFunc {
 				return
 			}
 
-			if req.ClaudeBaseURL == "" {
-				req.ClaudeBaseURL = "https://api.anthropic.com"
-			}
-
 			cfg.Set(req.ClaudeAPIKey, req.ClaudeBaseURL)
-			if req.ModelMapping != nil || req.DefaultModel != "" {
-				cfg.SetModelMapping(req.ModelMapping, req.DefaultModel)
+			if req.ModelMapping != nil || req.DefaultModel != "" || req.APIFormat != "" {
+				cfg.SetModelMapping(req.ModelMapping, req.DefaultModel, req.APIFormat)
 			}
-			log.Printf("Settings updated: base_url=%s, default_model=%s", req.ClaudeBaseURL, req.DefaultModel)
+			log.Printf("Settings updated: base_url=%s, default_model=%s, api_format=%s", req.ClaudeBaseURL, req.DefaultModel, req.APIFormat)
 
 			apiKey, baseURL := cfg.Snapshot()
-			mapping, defaultModel := cfg.GetModelMapping()
+			mapping, defaultModel, apiFormat := cfg.GetModelMapping()
 			json.NewEncoder(w).Encode(map[string]any{
 				"claude_api_key":  maskAPIKey(apiKey),
 				"claude_base_url": baseURL,
 				"model_mapping":   mapping,
 				"default_model":   defaultModel,
+				"api_format":      apiFormat,
 				"status":          "ok",
 			})
 
@@ -308,7 +325,7 @@ func handleResponses(cfg *Config) http.HandlerFunc {
 
 		apiKey := cfg.GetAPIKey()
 		if apiKey == "" {
-			writeErrorResponse(w, http.StatusServiceUnavailable, "Claude API key not configured. Please set it in the settings page.")
+			writeErrorResponse(w, http.StatusServiceUnavailable, "API key not configured. Please set it in the settings page.")
 			return
 		}
 
@@ -319,7 +336,19 @@ func handleResponses(cfg *Config) http.HandlerFunc {
 		}
 		defer r.Body.Close()
 
-		claudeBody, err := converter.ConvertResponsesRequestToClaude(body)
+		apiFormat := cfg.GetAPIFormat()
+
+		var backendBody []byte
+		var backendPath string
+
+		switch apiFormat {
+		case "claude":
+			backendBody, err = converter.ConvertResponsesRequestToClaude(body)
+			backendPath = "/v1/messages"
+		default:
+			backendBody, err = converter.ConvertResponsesRequestToOpenAIChat(body)
+			backendPath = "/v1/chat/completions"
+		}
 		if err != nil {
 			log.Printf("Error converting request: %v", err)
 			writeErrorResponse(w, http.StatusBadRequest, fmt.Sprintf("Request conversion error: %v", err))
@@ -329,10 +358,15 @@ func handleResponses(cfg *Config) http.HandlerFunc {
 		var reqModel struct {
 			Model string `json:"model"`
 		}
-		json.Unmarshal(claudeBody, &reqModel)
+		json.Unmarshal(backendBody, &reqModel)
 		mappedModel := cfg.MapModel(reqModel.Model)
 		if mappedModel != reqModel.Model {
-			claudeBody, _ = converter.ReplaceModelInClaudeRequest(claudeBody, mappedModel)
+			switch apiFormat {
+			case "claude":
+				backendBody, _ = converter.ReplaceModelInClaudeRequest(backendBody, mappedModel)
+			default:
+				backendBody, _ = converter.ReplaceModelInOpenAIChatRequest(backendBody, mappedModel)
+			}
 			log.Printf("Model mapped: %s -> %s", reqModel.Model, mappedModel)
 		}
 
@@ -342,35 +376,40 @@ func handleResponses(cfg *Config) http.HandlerFunc {
 		json.Unmarshal(body, &reqPreview)
 
 		baseURL := cfg.GetBaseURL()
-		claudeURL := strings.TrimRight(baseURL, "/") + "/v1/messages"
+		backendURL := strings.TrimRight(baseURL, "/") + backendPath
 
-		claudeReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, claudeURL, bytes.NewReader(claudeBody))
+		backendReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, backendURL, bytes.NewReader(backendBody))
 		if err != nil {
-			log.Printf("Error creating Claude request: %v", err)
+			log.Printf("Error creating backend request: %v", err)
 			writeErrorResponse(w, http.StatusInternalServerError, "Internal server error")
 			return
 		}
 
-		claudeReq.Header.Set("Content-Type", "application/json")
-		claudeReq.Header.Set("x-api-key", apiKey)
-		claudeReq.Header.Set("anthropic-version", "2023-06-01")
+		backendReq.Header.Set("Content-Type", "application/json")
 
-		forwardHeaders(r, claudeReq, []string{
-			"anthropic-beta",
-			"anthropic-dangerous-direct-browser-access",
-		})
+		switch apiFormat {
+		case "claude":
+			backendReq.Header.Set("x-api-key", apiKey)
+			backendReq.Header.Set("anthropic-version", "2023-06-01")
+			forwardHeaders(r, backendReq, []string{
+				"anthropic-beta",
+				"anthropic-dangerous-direct-browser-access",
+			})
+		default:
+			backendReq.Header.Set("Authorization", "Bearer "+apiKey)
+		}
 
-		resp, err := client.Do(claudeReq)
+		resp, err := client.Do(backendReq)
 		if err != nil {
-			log.Printf("Error forwarding to Claude: %v", err)
-			writeErrorResponse(w, http.StatusBadGateway, fmt.Sprintf("Claude API error: %v", err))
+			log.Printf("Error forwarding to backend: %v", err)
+			writeErrorResponse(w, http.StatusBadGateway, fmt.Sprintf("Backend API error: %v", err))
 			return
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
 			respBody, _ := io.ReadAll(resp.Body)
-			log.Printf("Claude API returned status %d: %s", resp.StatusCode, string(respBody))
+			log.Printf("Backend API returned status %d: %s", resp.StatusCode, string(respBody))
 			for k, vs := range resp.Header {
 				for _, v := range vs {
 					w.Header().Add(k, v)
@@ -382,22 +421,28 @@ func handleResponses(cfg *Config) http.HandlerFunc {
 		}
 
 		if reqPreview.Stream {
-			handleStreamResponse(w, resp, r)
+			handleStreamResponse(w, resp, r, apiFormat)
 		} else {
-			handleNonStreamResponse(w, resp)
+			handleNonStreamResponse(w, resp, apiFormat)
 		}
 	}
 }
 
-func handleNonStreamResponse(w http.ResponseWriter, resp *http.Response) {
+func handleNonStreamResponse(w http.ResponseWriter, resp *http.Response, apiFormat string) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Printf("Error reading Claude response: %v", err)
-		writeErrorResponse(w, http.StatusBadGateway, "Failed to read Claude response")
+		log.Printf("Error reading backend response: %v", err)
+		writeErrorResponse(w, http.StatusBadGateway, "Failed to read backend response")
 		return
 	}
 
-	responsesBody, err := converter.ConvertClaudeResponseToResponses(body)
+	var responsesBody []byte
+	switch apiFormat {
+	case "claude":
+		responsesBody, err = converter.ConvertClaudeResponseToResponses(body)
+	default:
+		responsesBody, err = converter.ConvertOpenAIChatResponseToResponses(body)
+	}
 	if err != nil {
 		log.Printf("Error converting response: %v", err)
 		writeErrorResponse(w, http.StatusInternalServerError, fmt.Sprintf("Response conversion error: %v", err))
@@ -409,7 +454,7 @@ func handleNonStreamResponse(w http.ResponseWriter, resp *http.Response) {
 	w.Write(responsesBody)
 }
 
-func handleStreamResponse(w http.ResponseWriter, resp *http.Response, r *http.Request) {
+func handleStreamResponse(w http.ResponseWriter, resp *http.Response, r *http.Request, apiFormat string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeErrorResponse(w, http.StatusInternalServerError, "Streaming not supported")
@@ -449,9 +494,19 @@ func handleStreamResponse(w http.ResponseWriter, resp *http.Response, r *http.Re
 			break
 		}
 
-		converted, err := converter.ConvertClaudeStreamEventToResponses(
-			"", []byte(payload), ctx,
-		)
+		var converted [][]byte
+		var err error
+
+		switch apiFormat {
+		case "claude":
+			converted, err = converter.ConvertClaudeStreamEventToResponses(
+				"", []byte(payload), ctx,
+			)
+		default:
+			converted, err = converter.ConvertOpenAIStreamChunkToResponses(
+				[]byte(payload), ctx,
+			)
+		}
 		if err != nil {
 			log.Printf("Error converting stream event: %v", err)
 			continue
@@ -467,7 +522,7 @@ func handleStreamResponse(w http.ResponseWriter, resp *http.Response, r *http.Re
 		if r.Context().Err() != nil {
 			log.Printf("Client disconnected during stream: %v", r.Context().Err())
 		} else {
-			log.Printf("Error reading Claude stream: %v", err)
+			log.Printf("Error reading backend stream: %v", err)
 		}
 	}
 }
@@ -734,6 +789,14 @@ const settingsPageHTML = `<!DOCTYPE html>
         <input type="text" id="defaultModel" name="default_model" placeholder="claude-sonnet-4-20250514">
         <div class="hint">Fallback model when no mapping matches</div>
       </div>
+      <div class="form-group">
+        <label for="apiFormat">Backend API Format</label>
+        <select id="apiFormat" name="api_format" style="width:100%;padding:10px 14px;background:#0f0f11;border:1px solid #27272a;border-radius:10px;color:#fafafa;font-size:14px;font-family:'SF Mono','Fira Code',monospace;outline:none;">
+          <option value="claude">Claude / Anthropic (/v1/messages)</option>
+          <option value="openai">OpenAI Compatible (/v1/chat/completions)</option>
+        </select>
+        <div class="hint">Select the API format of your backend service</div>
+      </div>
       <button type="submit" class="btn" id="saveBtn">Save Settings</button>
     </form>
 
@@ -872,6 +935,9 @@ const settingsPageHTML = `<!DOCTYPE html>
       if (data.default_model) {
         document.getElementById('defaultModel').value = data.default_model;
       }
+      if (data.api_format) {
+        document.getElementById('apiFormat').value = data.api_format;
+      }
       if (data.model_mapping) {
         modelMapping = data.model_mapping;
       }
@@ -889,11 +955,13 @@ const settingsPageHTML = `<!DOCTYPE html>
     const apiKey = document.getElementById('apiKey').value;
     const baseUrl = document.getElementById('baseUrl').value;
     const defaultModel = document.getElementById('defaultModel').value;
+    const apiFormat = document.getElementById('apiFormat').value;
 
     const payload = {};
     if (apiKey) payload.claude_api_key = apiKey;
     if (baseUrl) payload.claude_base_url = baseUrl;
     if (defaultModel) payload.default_model = defaultModel;
+    payload.api_format = apiFormat;
     payload.model_mapping = modelMapping;
 
     try {
