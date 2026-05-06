@@ -513,6 +513,10 @@ func handleStreamResponse(w http.ResponseWriter, resp *http.Response, r *http.Re
 		}
 
 		for _, event := range converted {
+			eventType := converter.ExtractResponsesEventType(event)
+			if eventType != "" {
+				fmt.Fprintf(w, "event: %s\n", eventType)
+			}
 			fmt.Fprintf(w, "data: %s\n\n", event)
 			flusher.Flush()
 		}

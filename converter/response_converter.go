@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	jsonx "github.com/xy200303/claude-to-responses/converter/jsonx"
 )
@@ -104,14 +105,16 @@ func convertClaudeUsage(in *ClaudeUsage) *ResponsesUsage {
 }
 
 type StreamContext struct {
-	ResponseID    string
-	Model         string
+	ResponseID      string
+	ClaudeMsgID     string
+	Model           string
 	AccumulatedText string
-	ToolCalls     []ResponsesOutputItem
-	ToolArgsMap   map[string]string
+	ToolCalls       []ResponsesOutputItem
+	ToolArgsMap     map[string]string
 	CurrentBlockType string
 	CurrentToolID    string
 	CurrentToolName  string
+	CreatedAt       int64
 }
 
 func ConvertClaudeStreamEventToResponses(eventType string, body []byte, ctx *StreamContext) ([][]byte, error) {
@@ -124,11 +127,14 @@ func ConvertClaudeStreamEventToResponses(eventType string, body []byte, ctx *Str
 	case "message_start":
 		if claudeEvent.Message != nil {
 			if claudeEvent.Message.ID != "" {
-				ctx.ResponseID = claudeEvent.Message.ID
+				ctx.ClaudeMsgID = claudeEvent.Message.ID
 			}
 			if claudeEvent.Message.Model != "" {
 				ctx.Model = claudeEvent.Message.Model
 			}
+		}
+		if ctx.CreatedAt == 0 {
+			ctx.CreatedAt = currentTimeUnix()
 		}
 
 		var events [][]byte
@@ -137,11 +143,13 @@ func ConvertClaudeStreamEventToResponses(eventType string, body []byte, ctx *Str
 			Type:       "response.created",
 			ResponseID: ctx.ResponseID,
 			Response: &ResponsesEventResp{
-				ID:     ctx.ResponseID,
-				Object: "response",
-				Model:  ctx.Model,
-				Status: "in_progress",
-				Usage:  convertClaudeUsage(claudeEvent.Message.Usage),
+				ID:        ctx.ResponseID,
+				Object:    "response",
+				Model:     ctx.Model,
+				Status:    "in_progress",
+				Output:    []ResponsesOutputItem{},
+				Usage:     convertClaudeUsage(claudeEvent.Message.Usage),
+				CreatedAd: ctx.CreatedAt,
 			},
 		}
 		out, err := jsonx.Marshal(createdEvent)
@@ -154,10 +162,12 @@ func ConvertClaudeStreamEventToResponses(eventType string, body []byte, ctx *Str
 			Type:       "response.in_progress",
 			ResponseID: ctx.ResponseID,
 			Response: &ResponsesEventResp{
-				ID:     ctx.ResponseID,
-				Object: "response",
-				Model:  ctx.Model,
-				Status: "in_progress",
+				ID:        ctx.ResponseID,
+				Object:    "response",
+				Model:     ctx.Model,
+				Status:    "in_progress",
+				Output:    []ResponsesOutputItem{},
+				CreatedAd: ctx.CreatedAt,
 			},
 		}
 		out2, err := jsonx.Marshal(inProgressEvent)
@@ -174,15 +184,19 @@ func ConvertClaudeStreamEventToResponses(eventType string, body []byte, ctx *Str
 
 			switch claudeEvent.Content.Type {
 			case "text":
+				msgItemID := ctx.ClaudeMsgID
+				if msgItemID == "" {
+					msgItemID = ctx.ResponseID + "-msg"
+				}
 				itemAdded := ResponsesStreamEvent{
 					Type:        "response.output_item.added",
 					ResponseID:  ctx.ResponseID,
 					OutputIndex: claudeEvent.Index,
 					Item: &ResponsesOutputItem{
-						Type:   "message",
-						ID:     ctx.ResponseID + "-msg",
-						Role:   "assistant",
-						Status: "in_progress",
+						Type:    "message",
+						ID:      msgItemID,
+						Role:    "assistant",
+						Status:  "in_progress",
 						Content: []ResponsesContentPart{},
 					},
 				}
@@ -194,7 +208,7 @@ func ConvertClaudeStreamEventToResponses(eventType string, body []byte, ctx *Str
 				partAdded := ResponsesStreamEvent{
 					Type:         "response.content_part.added",
 					ResponseID:   ctx.ResponseID,
-					ItemID:       ctx.ResponseID + "-msg",
+					ItemID:       msgItemID,
 					OutputIndex:  claudeEvent.Index,
 					ContentIndex: 0,
 					Part: &ResponsesContentRef{
@@ -243,10 +257,14 @@ func ConvertClaudeStreamEventToResponses(eventType string, body []byte, ctx *Str
 			case "text_delta":
 				ctx.AccumulatedText += claudeEvent.Delta.Text
 
+				msgItemID := ctx.ClaudeMsgID
+				if msgItemID == "" {
+					msgItemID = ctx.ResponseID + "-msg"
+				}
 				deltaEvent := ResponsesStreamEvent{
 					Type:         "response.output_text.delta",
 					ResponseID:   ctx.ResponseID,
-					ItemID:       ctx.ResponseID + "-msg",
+					ItemID:       msgItemID,
 					OutputIndex:  claudeEvent.Index,
 					ContentIndex: 0,
 					Delta:        claudeEvent.Delta.Text,
@@ -280,12 +298,17 @@ func ConvertClaudeStreamEventToResponses(eventType string, body []byte, ctx *Str
 	case "content_block_stop":
 		var events [][]byte
 
+		msgItemID := ctx.ClaudeMsgID
+		if msgItemID == "" {
+			msgItemID = ctx.ResponseID + "-msg"
+		}
+
 		switch ctx.CurrentBlockType {
 		case "text":
 			textDone := ResponsesStreamEvent{
 				Type:         "response.output_text.done",
 				ResponseID:   ctx.ResponseID,
-				ItemID:       ctx.ResponseID + "-msg",
+				ItemID:       msgItemID,
 				OutputIndex:  claudeEvent.Index,
 				ContentIndex: 0,
 				Part: &ResponsesContentRef{
@@ -302,7 +325,7 @@ func ConvertClaudeStreamEventToResponses(eventType string, body []byte, ctx *Str
 			partDone := ResponsesStreamEvent{
 				Type:         "response.content_part.done",
 				ResponseID:   ctx.ResponseID,
-				ItemID:       ctx.ResponseID + "-msg",
+				ItemID:       msgItemID,
 				OutputIndex:  claudeEvent.Index,
 				ContentIndex: 0,
 				Part: &ResponsesContentRef{
@@ -319,11 +342,11 @@ func ConvertClaudeStreamEventToResponses(eventType string, body []byte, ctx *Str
 			itemDone := ResponsesStreamEvent{
 				Type:        "response.output_item.done",
 				ResponseID:  ctx.ResponseID,
-				ItemID:      ctx.ResponseID + "-msg",
+				ItemID:      msgItemID,
 				OutputIndex: claudeEvent.Index,
 				Item: &ResponsesOutputItem{
 					Type:   "message",
-					ID:     ctx.ResponseID + "-msg",
+					ID:     msgItemID,
 					Role:   "assistant",
 					Status: "completed",
 					Content: []ResponsesContentPart{
@@ -409,12 +432,13 @@ func ConvertClaudeStreamEventToResponses(eventType string, body []byte, ctx *Str
 				Type:       "response.completed",
 				ResponseID: ctx.ResponseID,
 				Response: &ResponsesEventResp{
-					ID:     ctx.ResponseID,
-					Object: "response",
-					Model:  ctx.Model,
-					Status: convertStopReason(claudeEvent.Delta.StopReason),
-					Output: outputItems,
-					Usage:  convertClaudeUsage(claudeEvent.Usage),
+					ID:        ctx.ResponseID,
+					Object:    "response",
+					Model:     ctx.Model,
+					Status:    convertStopReason(claudeEvent.Delta.StopReason),
+					Output:    outputItems,
+					Usage:     convertClaudeUsage(claudeEvent.Usage),
+					CreatedAd: ctx.CreatedAt,
 				},
 			}
 			out, err := jsonx.Marshal(completedEvent)
@@ -436,10 +460,15 @@ func ConvertClaudeStreamEventToResponses(eventType string, body []byte, ctx *Str
 func buildCurrentOutputItems(ctx *StreamContext) []ResponsesOutputItem {
 	var items []ResponsesOutputItem
 
+	msgItemID := ctx.ClaudeMsgID
+	if msgItemID == "" {
+		msgItemID = ctx.ResponseID + "-msg"
+	}
+
 	if ctx.AccumulatedText != "" {
 		items = append(items, ResponsesOutputItem{
 			Type:    "message",
-			ID:      ctx.ResponseID + "-msg",
+			ID:      msgItemID,
 			Role:    "assistant",
 			Status:  "completed",
 			Content: []ResponsesContentPart{{Type: "output_text", Text: ctx.AccumulatedText}},
@@ -469,6 +498,16 @@ func ExtractClaudeStreamEventType(body []byte) string {
 	return event.Type
 }
 
+func ExtractResponsesEventType(payload []byte) string {
+	var event struct {
+		Type string `json:"type"`
+	}
+	if err := jsonx.Unmarshal(payload, &event); err != nil {
+		return ""
+	}
+	return event.Type
+}
+
 func GenerateResponseID() string {
 	return fmt.Sprintf("resp_%s", generateRandomString(24))
 }
@@ -480,6 +519,10 @@ func generateRandomString(n int) string {
 		b[i] = letters[i%len(letters)]
 	}
 	return string(b)
+}
+
+func currentTimeUnix() int64 {
+	return time.Now().Unix()
 }
 
 func unmarshalClaudeContent(raw json.RawMessage) ([]ClaudeContentPart, error) {

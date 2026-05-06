@@ -367,8 +367,11 @@ func TestConvertClaudeStreamEventToResponses_MessageStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if ctx.ResponseID != "msg_stream_123" {
-		t.Errorf("expected responseID msg_stream_123, got %s", ctx.ResponseID)
+	if ctx.ClaudeMsgID != "msg_stream_123" {
+		t.Errorf("expected ClaudeMsgID msg_stream_123, got %s", ctx.ClaudeMsgID)
+	}
+	if ctx.ResponseID != "resp_test123" {
+		t.Errorf("expected ResponseID to remain resp_test123, got %s", ctx.ResponseID)
 	}
 	if len(events) < 1 {
 		t.Fatalf("expected at least 1 event, got %d", len(events))

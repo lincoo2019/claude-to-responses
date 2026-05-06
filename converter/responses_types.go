@@ -77,16 +77,22 @@ type ResponsesStreamEvent struct {
 }
 
 type ResponsesEventResp struct {
-	ID     string               `json:"id,omitempty"`
-	Object string               `json:"object,omitempty"`
-	Model  string               `json:"model,omitempty"`
-	Status string               `json:"status,omitempty"`
-	Output []ResponsesOutputItem `json:"output,omitempty"`
-	Usage  *ResponsesUsage      `json:"usage,omitempty"`
+	ID        string               `json:"id,omitempty"`
+	Object    string               `json:"object,omitempty"`
+	Model     string               `json:"model,omitempty"`
+	Status    string               `json:"status,omitempty"`
+	Output    []ResponsesOutputItem `json:"output,omitempty"`
+	Usage     *ResponsesUsage      `json:"usage,omitempty"`
+	CreatedAd int64                `json:"created_at,omitempty"`
 }
 
 type ResponsesContentRef struct {
 	Type  string `json:"type"`
 	Text  string `json:"text,omitempty"`
 	Index int    `json:"index,omitempty"`
+}
+
+type StreamOutputEvent struct {
+	EventType string
+	Payload   []byte
 }

@@ -314,14 +314,19 @@ func ConvertOpenAIStreamChunkToResponses(body []byte, ctx *StreamContext) ([][]b
 
 	if choice.Delta != nil {
 		if choice.Delta.Role == "assistant" && ctx.ResponseID != "" {
+			if ctx.CreatedAt == 0 {
+				ctx.CreatedAt = currentTimeUnix()
+			}
 			createdEvent := ResponsesStreamEvent{
 				Type:       "response.created",
 				ResponseID: ctx.ResponseID,
 				Response: &ResponsesEventResp{
-					ID:     ctx.ResponseID,
-					Object: "response",
-					Model:  ctx.Model,
-					Status: "in_progress",
+					ID:        ctx.ResponseID,
+					Object:    "response",
+					Model:     ctx.Model,
+					Status:    "in_progress",
+					Output:    []ResponsesOutputItem{},
+					CreatedAd: ctx.CreatedAt,
 				},
 			}
 			out, err := jsonx.Marshal(createdEvent)
@@ -334,10 +339,12 @@ func ConvertOpenAIStreamChunkToResponses(body []byte, ctx *StreamContext) ([][]b
 				Type:       "response.in_progress",
 				ResponseID: ctx.ResponseID,
 				Response: &ResponsesEventResp{
-					ID:     ctx.ResponseID,
-					Object: "response",
-					Model:  ctx.Model,
-					Status: "in_progress",
+					ID:        ctx.ResponseID,
+					Object:    "response",
+					Model:     ctx.Model,
+					Status:    "in_progress",
+					Output:    []ResponsesOutputItem{},
+					CreatedAd: ctx.CreatedAt,
 				},
 			}
 			out2, err := jsonx.Marshal(inProgressEvent)
@@ -563,11 +570,12 @@ func ConvertOpenAIStreamChunkToResponses(body []byte, ctx *StreamContext) ([][]b
 			Type:       "response.completed",
 			ResponseID: ctx.ResponseID,
 			Response: &ResponsesEventResp{
-				ID:     ctx.ResponseID,
-				Object: "response",
-				Model:  ctx.Model,
-				Status: status,
-				Output: outputItems,
+				ID:        ctx.ResponseID,
+				Object:    "response",
+				Model:     ctx.Model,
+				Status:    status,
+				Output:    outputItems,
+				CreatedAd: ctx.CreatedAt,
 			},
 		}
 		out, err := jsonx.Marshal(completedEvent)
