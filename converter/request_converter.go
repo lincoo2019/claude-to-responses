@@ -8,6 +8,19 @@ import (
 	jsonx "github.com/xy200303/claude-to-responses/converter/jsonx"
 )
 
+func ReplaceModelInClaudeRequest(body []byte, newModel string) ([]byte, error) {
+	var req map[string]json.RawMessage
+	if err := jsonx.Unmarshal(body, &req); err != nil {
+		return nil, err
+	}
+	modelBytes, err := jsonx.Marshal(newModel)
+	if err != nil {
+		return nil, err
+	}
+	req["model"] = modelBytes
+	return jsonx.Marshal(req)
+}
+
 func ConvertResponsesRequestToClaude(body []byte) ([]byte, error) {
 	var req ResponsesRequest
 	if err := jsonx.Unmarshal(body, &req); err != nil {

@@ -26,6 +26,8 @@ type Config struct {
 	ClaudeBaseURL string
 	ListenAddr    string
 	configPath    string
+	ModelMapping  map[string]string
+	DefaultModel  string
 }
 
 func (c *Config) GetAPIKey() string {
@@ -52,6 +54,38 @@ func (c *Config) Set(apiKey, baseURL string) {
 	c.saveLocked()
 }
 
+func (c *Config) MapModel(model string) string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.ModelMapping != nil {
+		if mapped, ok := c.ModelMapping[model]; ok {
+			return mapped
+		}
+	}
+	if c.DefaultModel != "" {
+		return c.DefaultModel
+	}
+	return model
+}
+
+func (c *Config) SetModelMapping(mapping map[string]string, defaultModel string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ModelMapping = mapping
+	c.DefaultModel = defaultModel
+	c.saveLocked()
+}
+
+func (c *Config) GetModelMapping() (map[string]string, string) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	mapping := make(map[string]string)
+	for k, v := range c.ModelMapping {
+		mapping[k] = v
+	}
+	return mapping, c.DefaultModel
+}
+
 func (c *Config) Snapshot() (apiKey, baseURL string) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -59,8 +93,10 @@ func (c *Config) Snapshot() (apiKey, baseURL string) {
 }
 
 type configFile struct {
-	ClaudeAPIKey  string `json:"claude_api_key"`
-	ClaudeBaseURL string `json:"claude_base_url"`
+	ClaudeAPIKey  string            `json:"claude_api_key"`
+	ClaudeBaseURL string            `json:"claude_base_url"`
+	ModelMapping  map[string]string `json:"model_mapping,omitempty"`
+	DefaultModel  string            `json:"default_model,omitempty"`
 }
 
 func (c *Config) saveLocked() {
@@ -70,6 +106,8 @@ func (c *Config) saveLocked() {
 	data := configFile{
 		ClaudeAPIKey:  c.ClaudeAPIKey,
 		ClaudeBaseURL: c.ClaudeBaseURL,
+		ModelMapping:  c.ModelMapping,
+		DefaultModel:  c.DefaultModel,
 	}
 	raw, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
@@ -101,6 +139,12 @@ func (c *Config) loadFromFile() {
 	}
 	if data.ClaudeBaseURL != "" {
 		c.ClaudeBaseURL = data.ClaudeBaseURL
+	}
+	if data.ModelMapping != nil {
+		c.ModelMapping = data.ModelMapping
+	}
+	if data.DefaultModel != "" {
+		c.DefaultModel = data.DefaultModel
 	}
 }
 
@@ -193,16 +237,20 @@ func handleSettings(cfg *Config) http.HandlerFunc {
 		switch r.Method {
 		case http.MethodGet:
 			apiKey, baseURL := cfg.Snapshot()
-			maskedKey := maskAPIKey(apiKey)
-			json.NewEncoder(w).Encode(map[string]string{
-				"claude_api_key":  maskedKey,
+			mapping, defaultModel := cfg.GetModelMapping()
+			json.NewEncoder(w).Encode(map[string]any{
+				"claude_api_key":  maskAPIKey(apiKey),
 				"claude_base_url": baseURL,
+				"model_mapping":   mapping,
+				"default_model":   defaultModel,
 			})
 
 		case http.MethodPost:
 			var req struct {
-				ClaudeAPIKey  string `json:"claude_api_key"`
-				ClaudeBaseURL string `json:"claude_base_url"`
+				ClaudeAPIKey  string            `json:"claude_api_key"`
+				ClaudeBaseURL string            `json:"claude_base_url"`
+				ModelMapping  map[string]string `json:"model_mapping"`
+				DefaultModel  string            `json:"default_model"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				w.WriteHeader(http.StatusBadRequest)
@@ -215,12 +263,18 @@ func handleSettings(cfg *Config) http.HandlerFunc {
 			}
 
 			cfg.Set(req.ClaudeAPIKey, req.ClaudeBaseURL)
-			log.Printf("Settings updated: base_url=%s", req.ClaudeBaseURL)
+			if req.ModelMapping != nil || req.DefaultModel != "" {
+				cfg.SetModelMapping(req.ModelMapping, req.DefaultModel)
+			}
+			log.Printf("Settings updated: base_url=%s, default_model=%s", req.ClaudeBaseURL, req.DefaultModel)
 
 			apiKey, baseURL := cfg.Snapshot()
-			json.NewEncoder(w).Encode(map[string]string{
+			mapping, defaultModel := cfg.GetModelMapping()
+			json.NewEncoder(w).Encode(map[string]any{
 				"claude_api_key":  maskAPIKey(apiKey),
 				"claude_base_url": baseURL,
+				"model_mapping":   mapping,
+				"default_model":   defaultModel,
 				"status":          "ok",
 			})
 
@@ -270,6 +324,16 @@ func handleResponses(cfg *Config) http.HandlerFunc {
 			log.Printf("Error converting request: %v", err)
 			writeErrorResponse(w, http.StatusBadRequest, fmt.Sprintf("Request conversion error: %v", err))
 			return
+		}
+
+		var reqModel struct {
+			Model string `json:"model"`
+		}
+		json.Unmarshal(claudeBody, &reqModel)
+		mappedModel := cfg.MapModel(reqModel.Model)
+		if mappedModel != reqModel.Model {
+			claudeBody, _ = converter.ReplaceModelInClaudeRequest(claudeBody, mappedModel)
+			log.Printf("Model mapped: %s -> %s", reqModel.Model, mappedModel)
 		}
 
 		var reqPreview struct {
@@ -455,7 +519,7 @@ const settingsPageHTML = `<!DOCTYPE html>
   }
   .container {
     width: 100%;
-    max-width: 520px;
+    max-width: 560px;
     padding: 24px;
   }
   .card {
@@ -485,7 +549,7 @@ const settingsPageHTML = `<!DOCTYPE html>
     color: #a1a1aa;
     margin-bottom: 6px;
   }
-  input {
+  input, textarea {
     width: 100%;
     padding: 10px 14px;
     background: #0f0f11;
@@ -497,11 +561,20 @@ const settingsPageHTML = `<!DOCTYPE html>
     outline: none;
     transition: border-color 0.2s;
   }
-  input:focus {
+  input:focus, textarea:focus {
     border-color: #6366f1;
   }
-  input::placeholder {
+  input::placeholder, textarea::placeholder {
     color: #3f3f46;
+  }
+  textarea {
+    resize: vertical;
+    min-height: 80px;
+  }
+  .hint {
+    font-size: 11px;
+    color: #52525b;
+    margin-top: 4px;
   }
   .btn {
     width: 100%;
@@ -593,6 +666,52 @@ const settingsPageHTML = `<!DOCTYPE html>
   }
   .method.post { background: rgba(34,197,94,0.15); color: #22c55e; }
   .method.get { background: rgba(59,130,246,0.15); color: #3b82f6; }
+  .mapping-list {
+    margin-top: 8px;
+  }
+  .mapping-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    background: #0f0f11;
+    border-radius: 8px;
+    margin-bottom: 4px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 12px;
+  }
+  .mapping-arrow { color: #6366f1; }
+  .mapping-del {
+    margin-left: auto;
+    background: none;
+    border: none;
+    color: #71717a;
+    cursor: pointer;
+    font-size: 16px;
+    padding: 0 4px;
+  }
+  .mapping-del:hover { color: #ef4444; }
+  .add-mapping {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .add-mapping input {
+    flex: 1;
+    padding: 8px 10px;
+    font-size: 12px;
+  }
+  .add-mapping button {
+    padding: 8px 14px;
+    background: #27272a;
+    color: #e4e4e7;
+    border: 1px solid #3f3f46;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  .add-mapping button:hover { background: #3f3f46; }
 </style>
 </head>
 <body>
@@ -610,10 +729,25 @@ const settingsPageHTML = `<!DOCTYPE html>
         <label for="baseUrl">Claude Base URL</label>
         <input type="url" id="baseUrl" name="claude_base_url" placeholder="https://api.anthropic.com">
       </div>
+      <div class="form-group">
+        <label for="defaultModel">Default Model</label>
+        <input type="text" id="defaultModel" name="default_model" placeholder="claude-sonnet-4-20250514">
+        <div class="hint">Fallback model when no mapping matches</div>
+      </div>
       <button type="submit" class="btn" id="saveBtn">Save Settings</button>
     </form>
 
     <div id="status" class="status"></div>
+
+    <div class="info-section">
+      <div class="info-title">Model Mapping</div>
+      <div id="mappingList" class="mapping-list"></div>
+      <div class="add-mapping">
+        <input type="text" id="mapFrom" placeholder="gpt-4o">
+        <input type="text" id="mapTo" placeholder="claude-sonnet-4-20250514">
+        <button type="button" id="addMapBtn">Add</button>
+      </div>
+    </div>
 
     <div class="info-section">
       <div class="info-title">Current Status</div>
@@ -624,6 +758,10 @@ const settingsPageHTML = `<!DOCTYPE html>
       <div class="info-row">
         <span class="info-label">Base URL</span>
         <span id="currentUrl" class="info-value">-</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Default Model</span>
+        <span id="currentModel" class="info-value">-</span>
       </div>
       <div class="info-row">
         <span class="info-label">Status</span>
@@ -655,8 +793,11 @@ const settingsPageHTML = `<!DOCTYPE html>
   const statusEl = document.getElementById('status');
   const currentKeyEl = document.getElementById('currentKey');
   const currentUrlEl = document.getElementById('currentUrl');
+  const currentModelEl = document.getElementById('currentModel');
   const currentStatusEl = document.getElementById('currentStatus');
   const saveBtn = document.getElementById('saveBtn');
+  const mappingListEl = document.getElementById('mappingList');
+  let modelMapping = {};
 
   function showStatus(msg, type) {
     statusEl.textContent = msg;
@@ -666,12 +807,58 @@ const settingsPageHTML = `<!DOCTYPE html>
     }
   }
 
+  function renderMappings() {
+    mappingListEl.innerHTML = '';
+    const keys = Object.keys(modelMapping);
+    if (keys.length === 0) {
+      mappingListEl.innerHTML = '<div style="font-size:12px;color:#52525b;padding:4px 0;">No mappings configured</div>';
+      return;
+    }
+    keys.forEach(from => {
+      const row = document.createElement('div');
+      row.className = 'mapping-row';
+      row.innerHTML = '<span>' + escHtml(from) + '</span><span class="mapping-arrow">&rarr;</span><span>' + escHtml(modelMapping[from]) + '</span><button class="mapping-del" data-from="' + escAttr(from) + '">&times;</button>';
+      mappingListEl.appendChild(row);
+    });
+    mappingListEl.querySelectorAll('.mapping-del').forEach(btn => {
+      btn.addEventListener('click', () => {
+        delete modelMapping[btn.dataset.from];
+        saveModelMapping();
+        renderMappings();
+      });
+    });
+  }
+
+  function escHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+  function escAttr(s) { return s.replace(/"/g, '&quot;'); }
+
+  async function saveModelMapping() {
+    const defaultModel = document.getElementById('defaultModel').value;
+    await fetch('/v1/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model_mapping: modelMapping, default_model: defaultModel }),
+    });
+  }
+
+  document.getElementById('addMapBtn').addEventListener('click', () => {
+    const from = document.getElementById('mapFrom').value.trim();
+    const to = document.getElementById('mapTo').value.trim();
+    if (!from || !to) return;
+    modelMapping[from] = to;
+    document.getElementById('mapFrom').value = '';
+    document.getElementById('mapTo').value = '';
+    saveModelMapping();
+    renderMappings();
+  });
+
   async function loadSettings() {
     try {
       const resp = await fetch('/v1/settings');
       const data = await resp.json();
       currentKeyEl.textContent = data.claude_api_key || '(not set)';
       currentUrlEl.textContent = data.claude_base_url || '(not set)';
+      currentModelEl.textContent = data.default_model || '(not set)';
 
       if (data.claude_api_key && data.claude_api_key !== '') {
         currentStatusEl.innerHTML = '<span class="badge ok">Configured</span>';
@@ -682,6 +869,13 @@ const settingsPageHTML = `<!DOCTYPE html>
       if (data.claude_base_url) {
         document.getElementById('baseUrl').value = data.claude_base_url;
       }
+      if (data.default_model) {
+        document.getElementById('defaultModel').value = data.default_model;
+      }
+      if (data.model_mapping) {
+        modelMapping = data.model_mapping;
+      }
+      renderMappings();
     } catch (e) {
       currentStatusEl.innerHTML = '<span class="badge warn">Error</span>';
     }
@@ -694,10 +888,13 @@ const settingsPageHTML = `<!DOCTYPE html>
 
     const apiKey = document.getElementById('apiKey').value;
     const baseUrl = document.getElementById('baseUrl').value;
+    const defaultModel = document.getElementById('defaultModel').value;
 
     const payload = {};
     if (apiKey) payload.claude_api_key = apiKey;
     if (baseUrl) payload.claude_base_url = baseUrl;
+    if (defaultModel) payload.default_model = defaultModel;
+    payload.model_mapping = modelMapping;
 
     try {
       const resp = await fetch('/v1/settings', {
