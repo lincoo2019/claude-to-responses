@@ -115,6 +115,8 @@ type StreamContext struct {
 	CurrentToolID    string
 	CurrentToolName  string
 	CreatedAt       int64
+	CompletedSent   bool
+	LastUsage       *ResponsesUsage
 }
 
 func ConvertClaudeStreamEventToResponses(eventType string, body []byte, ctx *StreamContext) ([][]byte, error) {
@@ -413,10 +415,11 @@ func ConvertClaudeStreamEventToResponses(eventType string, body []byte, ctx *Str
 		var events [][]byte
 
 		if claudeEvent.Usage != nil {
+			ctx.LastUsage = convertClaudeUsage(claudeEvent.Usage)
 			usageEvent := ResponsesStreamEvent{
 				Type:       "response.usage",
 				ResponseID: ctx.ResponseID,
-				Usage:      convertClaudeUsage(claudeEvent.Usage),
+				Usage:      ctx.LastUsage,
 			}
 			out, err := jsonx.Marshal(usageEvent)
 			if err != nil {
@@ -427,6 +430,7 @@ func ConvertClaudeStreamEventToResponses(eventType string, body []byte, ctx *Str
 
 		if claudeEvent.Delta != nil && claudeEvent.Delta.StopReason != "" {
 			outputItems := buildCurrentOutputItems(ctx)
+			endTurn := true
 
 			completedEvent := ResponsesStreamEvent{
 				Type:       "response.completed",
@@ -439,6 +443,7 @@ func ConvertClaudeStreamEventToResponses(eventType string, body []byte, ctx *Str
 					Output:    outputItems,
 					Usage:     convertClaudeUsage(claudeEvent.Usage),
 					CreatedAd: ctx.CreatedAt,
+					EndTurn:   &endTurn,
 				},
 			}
 			out, err := jsonx.Marshal(completedEvent)
@@ -446,12 +451,41 @@ func ConvertClaudeStreamEventToResponses(eventType string, body []byte, ctx *Str
 				return events, err
 			}
 			events = append(events, out)
+			ctx.CompletedSent = true
 		}
 
 		return events, nil
 
 	case "message_stop":
-		return nil, nil
+		if ctx.CompletedSent {
+			return nil, nil
+		}
+		outputItems := buildCurrentOutputItems(ctx)
+		endTurn := true
+		usage := ctx.LastUsage
+		if usage == nil {
+			usage = &ResponsesUsage{}
+		}
+		completedEvent := ResponsesStreamEvent{
+			Type:       "response.completed",
+			ResponseID: ctx.ResponseID,
+			Response: &ResponsesEventResp{
+				ID:        ctx.ResponseID,
+				Object:    "response",
+				Model:     ctx.Model,
+				Status:    "completed",
+				Output:    outputItems,
+				Usage:     usage,
+				CreatedAd: ctx.CreatedAt,
+				EndTurn:   &endTurn,
+			},
+		}
+		out, err := jsonx.Marshal(completedEvent)
+		if err != nil {
+			return nil, err
+		}
+		ctx.CompletedSent = true
+		return [][]byte{out}, nil
 	}
 
 	return nil, nil

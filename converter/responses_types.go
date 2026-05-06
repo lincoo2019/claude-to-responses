@@ -58,9 +58,9 @@ type ResponsesOutputItem struct {
 }
 
 type ResponsesUsage struct {
-	InputTokens  int `json:"input_tokens,omitempty"`
-	OutputTokens int `json:"output_tokens,omitempty"`
-	TotalTokens  int `json:"total_tokens,omitempty"`
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+	TotalTokens  int `json:"total_tokens"`
 }
 
 type ResponsesStreamEvent struct {
@@ -84,6 +84,7 @@ type ResponsesEventResp struct {
 	Output    []ResponsesOutputItem `json:"output,omitempty"`
 	Usage     *ResponsesUsage      `json:"usage,omitempty"`
 	CreatedAd int64                `json:"created_at,omitempty"`
+	EndTurn   *bool                `json:"end_turn,omitempty"`
 }
 
 type ResponsesContentRef struct {

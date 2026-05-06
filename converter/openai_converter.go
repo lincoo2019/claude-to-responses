@@ -566,6 +566,7 @@ func ConvertOpenAIStreamChunkToResponses(body []byte, ctx *StreamContext) ([][]b
 		}
 
 		outputItems := buildCurrentOutputItems(ctx)
+		endTurn := true
 		completedEvent := ResponsesStreamEvent{
 			Type:       "response.completed",
 			ResponseID: ctx.ResponseID,
@@ -576,6 +577,8 @@ func ConvertOpenAIStreamChunkToResponses(body []byte, ctx *StreamContext) ([][]b
 				Status:    status,
 				Output:    outputItems,
 				CreatedAd: ctx.CreatedAt,
+				Usage:     &ResponsesUsage{},
+				EndTurn:   &endTurn,
 			},
 		}
 		out, err := jsonx.Marshal(completedEvent)
@@ -583,6 +586,7 @@ func ConvertOpenAIStreamChunkToResponses(body []byte, ctx *StreamContext) ([][]b
 			return events, err
 		}
 		events = append(events, out)
+		ctx.CompletedSent = true
 	}
 
 	return events, nil
