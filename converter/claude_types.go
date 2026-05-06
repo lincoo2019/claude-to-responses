@@ -11,6 +11,7 @@ type ClaudeRequest struct {
 	MaxTokens   *int            `json:"max_tokens,omitempty"`
 	Stream      bool            `json:"stream,omitempty"`
 	Tools       []ClaudeTool    `json:"tools,omitempty"`
+	ToolChoice  json.RawMessage `json:"tool_choice,omitempty"`
 	Metadata    map[string]any  `json:"metadata,omitempty"`
 }
 

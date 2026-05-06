@@ -11,6 +11,7 @@ type ResponsesRequest struct {
 	MaxOutputTokens *int             `json:"max_output_tokens,omitempty"`
 	Stream          bool             `json:"stream,omitempty"`
 	Tools           []ResponsesTool  `json:"tools,omitempty"`
+	ToolChoice      json.RawMessage  `json:"tool_choice,omitempty"`
 	Metadata        map[string]any   `json:"metadata,omitempty"`
 }
 

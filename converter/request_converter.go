@@ -124,6 +124,20 @@ func ConvertResponsesRequestToClaude(body []byte) ([]byte, error) {
 		}
 	}
 
+	if req.ToolChoice != nil && len(req.ToolChoice) > 0 {
+		var choice string
+		if err := jsonx.Unmarshal(req.ToolChoice, &choice); err == nil {
+			switch choice {
+			case "auto":
+				claudeReq.ToolChoice = json.RawMessage(`{"type":"auto"}`)
+			case "required":
+				claudeReq.ToolChoice = json.RawMessage(`{"type":"any"}`)
+			case "none":
+				claudeReq.ToolChoice = json.RawMessage(`{"type":"none"}`)
+			}
+		}
+	}
+
 	return jsonx.Marshal(claudeReq)
 }
 

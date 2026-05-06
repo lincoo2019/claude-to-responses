@@ -353,6 +353,21 @@ func handleResponses(cfg *Config) http.HandlerFunc {
 			return
 		}
 
+		var diagReq struct {
+			Tools []struct {
+				Name string `json:"name"`
+			} `json:"tools,omitempty"`
+			System json.RawMessage `json:"system,omitempty"`
+		}
+		if json.Unmarshal(backendBody, &diagReq) == nil {
+			toolNames := make([]string, 0, len(diagReq.Tools))
+			for _, t := range diagReq.Tools {
+				toolNames = append(toolNames, t.Name)
+			}
+			hasSystem := diagReq.System != nil && len(diagReq.System) > 2
+			log.Printf("Backend request: tools=%v, has_system=%v", toolNames, hasSystem)
+		}
+
 		var reqModel struct {
 			Model string `json:"model"`
 		}
@@ -376,7 +391,7 @@ func handleResponses(cfg *Config) http.HandlerFunc {
 		baseURL := cfg.GetBaseURL()
 		backendURL := strings.TrimRight(baseURL, "/") + backendPath
 
-		backendReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, backendURL, bytes.NewReader(backendBody))
+		backendReq, err := http.NewRequestWithContext(context.Background(), http.MethodPost, backendURL, bytes.NewReader(backendBody))
 		if err != nil {
 			log.Printf("Error creating backend request: %v", err)
 			writeErrorResponse(w, http.StatusInternalServerError, "Internal server error")
@@ -475,6 +490,7 @@ func handleStreamResponse(w http.ResponseWriter, resp *http.Response, r *http.Re
 	reader := bufio.NewReaderSize(resp.Body, 64*1024)
 	eventCount := 0
 	convertedCount := 0
+	clientDisconnected := false
 
 	for {
 		line, err := reader.ReadString('\n')
@@ -486,6 +502,7 @@ func handleStreamResponse(w http.ResponseWriter, resp *http.Response, r *http.Re
 				}
 			} else {
 				if r.Context().Err() != nil {
+					clientDisconnected = true
 					log.Printf("Client disconnected during stream: %v (after %d backend events, %d converted)", r.Context().Err(), eventCount, convertedCount)
 				} else {
 					log.Printf("Error reading backend stream: %v (after %d backend events, %d converted)", err, eventCount, convertedCount)
@@ -512,8 +529,6 @@ func handleStreamResponse(w http.ResponseWriter, resp *http.Response, r *http.Re
 
 		if payload == "[DONE]" {
 			log.Printf("Stream [DONE] received after %d backend events, %d converted events", eventCount, convertedCount)
-			fmt.Fprintf(w, "data: [DONE]\n\n")
-			flusher.Flush()
 			break
 		}
 
@@ -537,15 +552,41 @@ func handleStreamResponse(w http.ResponseWriter, resp *http.Response, r *http.Re
 			continue
 		}
 
+		var rawEvt struct {
+			Type    string `json:"type"`
+			Content *struct {
+				Type string `json:"type"`
+				Name string `json:"name"`
+			} `json:"content_block,omitempty"`
+			Delta *struct {
+				Type       string `json:"type"`
+				StopReason string `json:"stop_reason"`
+			} `json:"delta,omitempty"`
+		}
+		if json.Unmarshal([]byte(payload), &rawEvt) == nil {
+			if rawEvt.Type == "content_block_start" && rawEvt.Content != nil {
+				log.Printf("  [backend] content_block_start: type=%s name=%s", rawEvt.Content.Type, rawEvt.Content.Name)
+			} else if rawEvt.Type == "message_delta" && rawEvt.Delta != nil && rawEvt.Delta.StopReason != "" {
+				log.Printf("  [backend] message_delta: stop_reason=%s", rawEvt.Delta.StopReason)
+			}
+		}
+
 		for _, event := range converted {
 			convertedCount++
 			eventType := converter.ExtractResponsesEventType(event)
+			if clientDisconnected {
+				continue
+			}
 			if eventType != "" {
 				fmt.Fprintf(w, "event: %s\n", eventType)
 			}
 			fmt.Fprintf(w, "data: %s\n\n", event)
 			flusher.Flush()
 		}
+	}
+
+	if clientDisconnected {
+		return
 	}
 
 	if !ctx.CompletedSent {
@@ -572,9 +613,10 @@ func handleStreamResponse(w http.ResponseWriter, resp *http.Response, r *http.Re
 			fmt.Fprintf(w, "event: response.completed\ndata: %s\n\n", out)
 			flusher.Flush()
 		}
-		fmt.Fprintf(w, "data: [DONE]\n\n")
-		flusher.Flush()
 	}
+
+	fmt.Fprintf(w, "data: [DONE]\n\n")
+	flusher.Flush()
 }
 
 func forwardHeaders(src *http.Request, dst *http.Request, headers []string) {

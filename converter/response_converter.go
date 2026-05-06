@@ -250,6 +250,9 @@ func ConvertClaudeStreamEventToResponses(eventType string, body []byte, ctx *Str
 					return nil, err
 				}
 				return [][]byte{out}, nil
+
+			case "thinking":
+				return nil, nil
 			}
 		}
 
@@ -294,6 +297,9 @@ func ConvertClaudeStreamEventToResponses(eventType string, body []byte, ctx *Str
 					return nil, err
 				}
 				return [][]byte{out}, nil
+
+			case "thinking_delta", "signature_delta":
+				return nil, nil
 			}
 		}
 
@@ -406,6 +412,9 @@ func ConvertClaudeStreamEventToResponses(eventType string, body []byte, ctx *Str
 
 			ctx.CurrentToolID = ""
 			ctx.CurrentToolName = ""
+
+		case "thinking":
+			return nil, nil
 		}
 
 		ctx.CurrentBlockType = ""
