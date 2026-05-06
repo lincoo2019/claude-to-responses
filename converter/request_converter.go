@@ -164,11 +164,18 @@ func convertResponsesInputItem(item ResponsesInputItem) (*ClaudeMessage, string,
 		}, "", nil
 
 	case "function_call":
+		var inputObj json.RawMessage = item.Arguments
+		if len(item.Arguments) > 0 {
+			var argsStr string
+			if err := jsonx.Unmarshal(item.Arguments, &argsStr); err == nil {
+				inputObj = json.RawMessage(argsStr)
+			}
+		}
 		raw, err := jsonx.Marshal([]ClaudeContentPart{{
 			Type:  "tool_use",
 			ID:    item.CallID,
 			Name:  item.Name,
-			Input: item.Arguments,
+			Input: inputObj,
 		}})
 		if err != nil {
 			return nil, "", err
